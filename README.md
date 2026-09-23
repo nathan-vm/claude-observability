@@ -25,33 +25,37 @@ those windows.
 
 ## Getting started
 
-The short path is `bin/setup`. It **discovers on its own** which Claude Code
-config directories you have, identifies the account behind each one, asks which
-ones you want to monitor, writes the configuration and enables telemetry in the
-right shell:
-
-```sh
-bin/setup
-```
-
-By hand:
+Bring the stack up yourself first — setup never does this for you:
 
 ```sh
 docker compose up -d               # otel-collector + loki + grafana
-
-# Collector config: plain env vars, no file — export the ones you need
-# (defaults cover the rest; see "The collector service" below), then:
-export CLAUDE_DIR="$HOME/.claude"
-bin/install-service.sh install     # the collector — see "The collector service"
 ```
+
+Then download the `claude-observability-setup` binary for your OS/arch from
+this repo's [Releases page](../../releases) (or build it yourself:
+`cd setup && go build ./cmd/setup`), and run it from the repo root:
+
+```sh
+./claude-observability-setup
+```
+
+It **discovers on its own** which Claude Code config directories you have,
+identifies the account behind each one, asks which ones you want to monitor,
+asks for the OTel endpoint and an optional token (prefilled with the local
+defaults — edit them if you're running docker on different ports), checks
+that the endpoint is actually reachable before writing anything, enables
+telemetry in the right shell/OS, and offers to install the collector as a
+background service. No Node, Python, or other runtime needed to run it — just
+the OS itself (Windows included).
 
 ### More than one account
 
 It is common to keep accounts split by context (`~/.claude-personal`,
 `~/.claude-work`), each with its own config directory. The first one is
 `CLAUDE_DIR`; the rest go in `CLAUDE_OBSERVABILITY_EXTRA_DIRS`, colon-separated
-like `$PATH` — `collector/accounts.mjs` reads both directly, as plain
-environment variables:
+like `$PATH` — `collector-old/accounts.mjs` reads both directly, as plain
+environment variables (the future Go collector's `internal/accounts` package
+will read the same two variables the same way):
 
 ```sh
 export CLAUDE_DIR="$HOME/.claude-personal"
@@ -70,21 +74,18 @@ server — the panel read 4 thousand tokens where the real number was 268 thousa
 
 ## Enabling telemetry in every session
 
-The wizard does this for you, picking the right file for your shell, and
-writes the collector config (`CLAUDE_DIR`, `CLAUDE_OBSERVABILITY_EXTRA_DIRS`,
-`EXPORTER_STREAM`) into the same file, right after it — one block, one place
-to look. By hand, from the repo root:
+The setup binary does this for you: bash/zsh rc, fish config, or on Windows,
+persistent user environment variables (`setx`) — whichever matches your OS,
+picked automatically. It writes the OTel telemetry vars
+(`OTEL_EXPORTER_OTLP_ENDPOINT`, and `OTEL_EXPORTER_OTLP_HEADERS` if you gave
+it a token) and the collector config (`CLAUDE_DIR`,
+`CLAUDE_OBSERVABILITY_EXTRA_DIRS`, `EXPORTER_STREAM`) into the same block, one
+place to look. Re-running the binary is a no-op if that block is already
+present — edit it by hand to change values.
 
-```sh
-cat bin/claude-telemetry.sh   >> ~/.bashrc                    # bash
-cat bin/claude-telemetry.sh   >> ~/.zshrc                     # zsh
-cat bin/claude-telemetry.fish >> ~/.config/fish/config.fish   # fish
-```
-
-Both files carry the same values — change one, change the other.
-
-Open a new terminal (or `source` the file). The first data point arrives within a
-minute of the first prompt (that is the export interval; see "Resource usage").
+Open a new terminal (or reload your shell config). The first data point
+arrives within a minute of the first prompt (that is the export interval; see
+"Resource usage").
 
 There is no `.env` file. Every knob covered on this page — `EXPORTER_STREAM`,
 `CLAUDE_DIR`, `RATE_HALFLIFE`, `POLL_SECONDS`, `DASHBOARD_INTERVAL_SECONDS`,
