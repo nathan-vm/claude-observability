@@ -1,0 +1,1012 @@
+#!/usr/bin/env node
+// Exports Claude Code tool calls from the local transcripts into Loki.
+//
+// WHY THIS EXISTS
+// Claude Code redacts the names of locally configured MCP servers across ALL of
+// its OTel telemetry: in the Prometheus metrics `mcp_server_name` becomes
+// "custom", and since 2.1.x the `tool_result` log also redacts `tool_name` to
+// "mcp_tool". The result: ~85% of MCP token spend lands in one anonymous bucket.
+// The local transcripts (`<config>/projects/<slug>/<session>.jsonl`) keep the
+// real name (mcp__<server>__<tool>), so they are the only possible source for
+// attributing tokens per MCP server/tool.
+//
+// WHAT IT EMITS
+// One Loki line per `tool_use` block, with the real tool name and the tokens
+// attributed to it. The `request_id` matches 1:1 the `request_id` attribute of
+// the `api_request` event Claude Code sends over OTel, so both sides can be
+// joined.
+//
+// HOW TOKENS ARE ATTRIBUTED
+// A tool's cost is what the model paid to READ its result: the input side
+// (input_tokens + cache_creation_input_tokens) of the NEXT assistant message on
+// the same track. With several tools called in parallel from one message, that
+// total is split proportionally to each result's size. `cache_read` is left out
+// on purpose: what matters is the marginal cost of the call, not its drag on the
+// turns that follow.
+//
+// Scanning is one piece of collector.mjs's loop, not its own process — see
+// that file for --once/--dry-run/--rescan, which still work the same way.
+
+import { readFile, writeFile, mkdir, readdir, stat, rename } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { createInterface } from 'node:readline';
+import { fileURLToPath } from 'node:url';
+import { join, dirname, basename } from 'node:path';
+import { resolveConfigDirs } from './accounts.mjs';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+// The repo root — one level up from collector/. Used for defaults that must
+// resolve the same way regardless of the process's cwd.
+const OBS_ROOT = join(HERE, '..');
+export const LOKI_URL = process.env.LOKI_URL || 'http://localhost:47100';
+// One "projects/" directory per monitored account. TRANSCRIPTS_DIR is an
+// escape hatch for manual/single-account runs; otherwise this is CLAUDE_DIR
+// plus CLAUDE_OBSERVABILITY_EXTRA_DIRS — see accounts.mjs.
+export const CONFIG_DIRS = process.env.TRANSCRIPTS_DIR
+  ? [process.env.TRANSCRIPTS_DIR]
+  : resolveConfigDirs().map((dir) => join(dir, 'projects'));
+// A single shared state file: dedup is keyed by tool_use_id, which is unique
+// across accounts, so one file for every account scanned is enough.
+const STATE_FILE = process.env.STATE_FILE || join(OBS_ROOT, '.state', 'collector-state.json');
+const BATCH_SIZE = Number(process.env.BATCH_SIZE || 2000);
+// A pending group with no "next assistant message" after this long is treated as
+// orphaned (session ended mid-turn) and goes out with zero attribution.
+const ORPHAN_AFTER_MS = Number(process.env.ORPHAN_AFTER_MS || 15 * 60 * 1000);
+// How long to remember an already-exported tool_use_id, so a resumed session is
+// not counted twice (see dedup below). Aligned with Loki's retention.
+const DEDUP_DAYS = Number(process.env.DEDUP_DAYS || 90);
+// Reset do limite semanal da Anthropic: dia da semana (0=domingo) e hora local.
+// Varia por conta; ajuste se o seu /usage discordar.
+export const WEEK_START_DAY = Number(process.env.WEEK_START_DAY || 1);
+export const WEEK_START_HOUR = Number(process.env.WEEK_START_HOUR || 0);
+export const TZ_OFFSET_HOURS = Number(process.env.TZ_OFFSET_HOURS || -3);
+// Smoothing of the consumption-rate panel. 20min was the best trade-off on real
+// data: 1h was so sluggish that 25min after stopping the curve still read 80% of
+// its peak, while the raw boxcar it replaces fell 30x in a single step.
+//
+// ONE variable, in one format, shared with dashboard-generator through .env — it
+// also ends up as a stream label, and the generator needs the identical string to
+// query the series it computes cutlines from.
+export const RATE_HALFLIFE = process.env.RATE_HALFLIFE || '20m';
+export const RATE_HALFLIFE_S = (() => {
+  const match = /^(\d+)([smh])$/.exec(RATE_HALFLIFE);
+  if (!match) throw new Error(`RATE_HALFLIFE must look like 20m, 90s or 2h (got "${RATE_HALFLIFE}")`);
+  return Number(match[1]) * { s: 1, m: 60, h: 3600 }[match[2]];
+})();
+// How far back the rate series is rebuilt on a first run. Loki here accepts old
+// samples on purpose (reject_old_samples: false), so the panel has history from
+// day one instead of filling in only going forward.
+export const RATE_BACKFILL_DAYS = Number(process.env.RATE_BACKFILL_DAYS || 14);
+// Lookback window for resolving a session's account. A stock Loki refuses queries
+// longer than 30d (max_query_length); this stack's loki-config.yaml lifts that
+// cap, but the default here stays safe for a Loki without it.
+const EMAIL_LOOKBACK_HOURS = Number(process.env.EMAIL_LOOKBACK_HOURS || 720);
+
+export const ONCE = process.argv.includes('--once');
+export const DRY_RUN = process.argv.includes('--dry-run');
+// NON-destructive re-read: zeroes the per-file offsets but keeps the dedup map.
+// Use it to generate a new record type (e.g. tokens per skill) out of existing
+// history without rewriting what was already exported — dedup blocks what is
+// already there and lets through only what is genuinely new.
+export const RESCAN = process.argv.includes('--rescan');
+// Name of the stream this exporter writes to. It is VERSIONED on purpose.
+//
+// Loki cannot replace derived data: the delete API marks a time window and then
+// filters it at query time, and a request that has already been processed can no
+// longer be removed — any reimport carrying historical timestamps falls inside
+// that window and is invisible FOREVER. Learned the hard way.
+//
+// So reimporting means writing under a new name. Bump EXPORTER_STREAM in .env
+// (the same value goes to dashboard-generator, which points the panels at it) and
+// the exporter rebuilds from scratch. The old generation is orphaned and ages out
+// on its own with the 90d retention.
+const STREAM = process.env.EXPORTER_STREAM || 'claude-code-exporter-1';
+const STREAM_LABELS = { service_name: STREAM, kind: 'tools' };
+// Segundo stream: tokens por skill com o nome REAL. O Claude Code redige skill de
+// plugin para "third-party" no api_request, igual faz com MCP — numa conta que só
+// usa skills de plugin, o painel inteiro colapsa numa linha só. O nome real está
+// no input do tool_use "Skill" dentro do transcript.
+const SKILL_STREAM_LABELS = { service_name: STREAM, kind: 'skills' };
+
+export const log = (...args) => console.log(new Date().toISOString(), ...args);
+
+// ---------------------------------------------------------------- estado
+
+const emptyState = () => ({
+  version: 2, files: {}, sessionEmail: {}, seen: {}, otelSkills: {}, ratePublished: {},
+  // sessionId -> [real plugin skill names]. This MUST survive across passes: the
+  // transcript line that reveals the real name is read exactly once, but that
+  // session's OTel events keep arriving for days. Without persisting it, every
+  // later pass labelled those requests "third-party" — and dedup by request_id
+  // then locks the wrong name in forever.
+  pluginSkills: {},
+  // request_id -> { skill, ts }. Finer-grained twin of pluginSkills: a session
+  // that used TWO OR MORE plugin skills can't be resolved from the per-session
+  // set alone (no way to tell which request belongs to which), so every one of
+  // its "third-party" requests stayed unresolved. This records the skill that
+  // was actually active at the moment of each specific request — the same
+  // activeSkill value already tracked per-track, just also keyed by the one id
+  // that joins to the OTel side. `ts` is only for pruning entries older than
+  // DEDUP_DAYS, the same cutoff rebuildSkillRecords ever looks back to.
+  pluginSkillByRequest: {},
+});
+
+export async function loadState() {
+  try {
+    const parsed = JSON.parse(await readFile(STATE_FILE, 'utf8'));
+    // v1 had no `seen` map. Migrate rather than discard: starting over re-reads
+    // every transcript and duplicates everything already in Loki.
+    if (parsed?.version === 1 || parsed?.version === 2) {
+      return { ...emptyState(), ...parsed, version: 2 };
+    }
+    log(`state has an unexpected version (${parsed?.version}); starting from scratch`);
+  } catch (error) {
+    if (error.code !== 'ENOENT') log(`state unreadable (${error.message}); starting from scratch`);
+  }
+  return emptyState();
+}
+
+export async function saveState(state) {
+  if (DRY_RUN) return;
+  await mkdir(dirname(STATE_FILE), { recursive: true });
+  // Write to a temp file and rename: a kill mid-write then cannot leave a
+  // truncated state that would make the exporter reprocess everything.
+  const tmp = `${STATE_FILE}.tmp`;
+  await writeFile(tmp, JSON.stringify(state));
+  await rename(tmp, STATE_FILE);
+}
+
+// ---------------------------------------------------------- transcripts
+
+// RECURSIVE scan, from a root that may hold several config directories mounted
+// side by side. Two things the previous version missed:
+//
+//   - subagent transcripts, which live in <session>/subagents/*.jsonl, one level
+//     deeper than it looked;
+//   - a second config directory (e.g. ~/.claude-work next to ~/.claude-personal),
+//     which is what you get when accounts are split by context.
+//
+// This was expensive to find: 331 calls from a single MCP server were missing.
+async function findTranscripts(dir, depth = 0) {
+  const found = [];
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      if (depth === 0) log(`transcript directory does not exist: ${dir}`);
+      return found;
+    }
+    throw error;
+  }
+  for (const entry of entries) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (depth < 6) found.push(...await findTranscripts(full, depth + 1));
+    } else if (entry.name.endsWith('.jsonl')) {
+      found.push(full);
+    }
+  }
+  return found;
+}
+
+// One root per monitored account (see CONFIG_DIRS) — there is no longer a
+// single mounted directory that has all of them as subfolders of it.
+async function findAllTranscripts(dirs) {
+  const lists = await Promise.all(dirs.map((dir) => findTranscripts(dir)));
+  return lists.flat();
+}
+
+function parseToolName(name) {
+  // mcp__<server>__<tool>. The tool name itself may contain "__", so split only
+  // on the first two occurrences.
+  if (!name?.startsWith('mcp__')) return { toolSource: 'builtin', mcpServer: '', mcpTool: '' };
+  const rest = name.slice('mcp__'.length);
+  const sep = rest.indexOf('__');
+  if (sep < 0) return { toolSource: 'mcp', mcpServer: rest, mcpTool: '' };
+  return { toolSource: 'mcp', mcpServer: rest.slice(0, sep), mcpTool: rest.slice(sep + 2) };
+}
+
+// str[i] and str[i+1] are the '<<' of a heredoc redirect. Finds where its
+// BODY ends (a line that is exactly the delimiter, optionally indented when
+// the redirect is '<<-'), so the caller can skip straight past it. Returns
+// null when this isn't actually a heredoc (e.g. a bare '<<' with no
+// delimiter word, or one whose closing line never appears — the latter can
+// legitimately happen if the command got truncated for logging, in which
+// case treating the remainder as ordinary text is the safer fallback).
+function heredocEnd(str, i) {
+  let j = i + 2;
+  if (str[j] === '-') j += 1;
+  while (str[j] === ' ' || str[j] === '\t') j += 1;
+  let delim = '';
+  if (str[j] === '"' || str[j] === "'") {
+    const q = str[j];
+    j += 1;
+    while (j < str.length && str[j] !== q) { delim += str[j]; j += 1; }
+    j += 1;
+  } else {
+    while (j < str.length && /\S/.test(str[j]) && str[j] !== ';' && str[j] !== '&' && str[j] !== '|') {
+      delim += str[j];
+      j += 1;
+    }
+  }
+  if (!delim) return null;
+  const bodyStart = str.indexOf('\n', j);
+  if (bodyStart < 0) return null;
+  const closeRe = new RegExp(`^[ \\t]*${delim.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[ \\t]*$`, 'm');
+  const match = closeRe.exec(str.slice(bodyStart + 1));
+  return match ? bodyStart + 1 + match.index + match[0].length : null;
+}
+
+// Tokenizes a shell command into words, grouped into top-level segments split
+// on &&, ||, ; and |. Quotes ('...', "...", `...`) and parens — which is what
+// makes a $(...) substitution or (...) subshell — make their contents atomic:
+// no word-splitting and no operator-splitting happens inside them. Doing both
+// jobs (segmenting AND word-splitting) in one pass is what makes
+// `FROM=$(date -v-6d +%F || date -d '...')` come out as ONE atomic word
+// (`FROM=$(...)`) instead of four bogus fragments (`+%F)`, `-v-6d`, ...): if
+// these were split separately, the leading `FROM=` would get skipped as an
+// env assignment and the next fragment of the SAME substitution would be
+// mistaken for a second command.
+//
+// A heredoc (`<<'EOF' ... EOF`) gets the same atomic treatment for its whole
+// body, found via heredocEnd — without it, every `;`/`|` inside a commit
+// message or an inline script leaks out as a fake segment boundary, and
+// whatever keyword starts a line inside it (if/for/const/...) leaks out as a
+// bogus "command". Confirmed live: this was the source of most of the
+// garbage still showing up after the quote/paren fix alone.
+//
+// Still not a full shell grammar — backslash escapes aren't handled — but
+// this covers the constructs that actually showed up in real commands.
+function tokenizeShell(str) {
+  const segments = [[]];
+  let word = '';
+  let quote = null;
+  let depth = 0;
+  const endWord = () => { if (word) segments.at(-1).push(word); word = ''; };
+  for (let i = 0; i < str.length; i += 1) {
+    const ch = str[i];
+    if (quote) {
+      word += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; word += ch; continue; }
+    if (ch === '(') { depth += 1; word += ch; continue; }
+    if (ch === ')') { depth = Math.max(0, depth - 1); word += ch; continue; }
+    if (depth > 0) { word += ch; continue; }
+    if (ch === '<' && str[i + 1] === '<') {
+      const end = heredocEnd(str, i);
+      if (end !== null) { word += str.slice(i, end); i = end - 1; continue; }
+    }
+    // `\` right before a newline is a line continuation: real shell removes
+    // both characters and joins the two lines with nothing between them, so
+    // this must NOT become a stray token or a segment break.
+    if (ch === '\\' && str[i + 1] === '\n') { i += 1; continue; }
+    // Any OTHER bare newline is a statement separator, same as `;` — most
+    // multi-line Bash calls are one command per line with no explicit `&&`
+    // between them, and without this only the first line's command was ever
+    // seen (everything after was folded into it as "arguments").
+    if (ch === '\n') { endWord(); segments.push([]); continue; }
+    if (/\s/.test(ch)) { endWord(); continue; }
+    if (ch === '&' && str[i + 1] === '&') { endWord(); segments.push([]); i += 1; continue; }
+    if (ch === '|' && str[i + 1] === '|') { endWord(); segments.push([]); i += 1; continue; }
+    if (ch === ';' || ch === '|') { endWord(); segments.push([]); continue; }
+    word += ch;
+  }
+  endWord();
+  return segments;
+}
+
+// Shell reserved words: syntax, never a command in their own right. Common
+// and legitimate (`for f in *; do ...; done`, `if x; then ...; fi`) — the `;`
+// separating them from the next clause is real shell grammar, not command
+// chaining, so tokenizeShell correctly segments on it, but that leaves each
+// keyword as a segment's first word. Confirmed live: "for"/"if"/"then"/"do"
+// were among the most frequent bogus names once the heredoc/paren issues
+// were fixed.
+const SHELL_KEYWORDS = new Set([
+  'if', 'then', 'else', 'elif', 'fi', 'for', 'while', 'until', 'do', 'done',
+  'case', 'esac', 'function', 'select', 'in', 'time',
+]);
+
+// A plausibility check for "does this look like an executable name or path" —
+// not a shell-grammar fragment (redirect target, glob, unbalanced quote/paren
+// remnant, reserved word). Conservative on purpose: reject anything starting
+// with a non-word character, or containing a character no real command name
+// has ($, `, ", ', *, (, ), %, <, >, &, ;). Better to silently drop one
+// call's attribution than mislabel it and pollute the breakdown with shell
+// debris — this is the safety net for whatever tokenizeShell still gets
+// wrong.
+function looksLikeCommandName(name) {
+  return !SHELL_KEYWORDS.has(name) && /^[A-Za-z0-9_][A-Za-z0-9_.\/@:-]*$/.test(name);
+}
+
+// Names every sub-command in a Bash `command` string, so `git status && ls -la`
+// attributes tokens to both `git` and `ls`, not just the first.
+//
+// The `rtk` PreToolUse hook installed on this machine rewrites recognized
+// commands before they execute (`git status` -> `rtk git status`), and
+// sometimes remaps them entirely (`cat file` -> `rtk read file`). Without
+// stripping that prefix, almost every Bash call would misclassify as "rtk"
+// instead of the command it actually ran. A command rtk left untouched
+// (unrecognized, or already prefixed) is used as-is.
+function extractBashCommands(commandStr) {
+  if (!commandStr) return [];
+  const names = [];
+  for (const tokens of tokenizeShell(commandStr)) {
+    let i = 0;
+    // skip leading env-var assignments (`FOO=bar git status`) and bare
+    // line-continuation backslashes (`&& \<newline>git status`, common in
+    // multi-line one-liners) — neither is the command itself.
+    while (i < tokens.length && (tokens[i] === '\\' || /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i]))) i += 1;
+    if (i >= tokens.length) continue;
+    let name = tokens[i];
+    if (name === 'rtk' && i + 1 < tokens.length) name = tokens[i + 1];
+    if (name && looksLikeCommandName(name)) names.push(name);
+  }
+  return names;
+}
+
+function blockSize(block) {
+  const content = block?.content;
+  if (typeof content === 'string') return content.length;
+  if (Array.isArray(content)) {
+    return content.reduce((sum, part) => {
+      if (typeof part === 'string') return sum + part.length;
+      if (part?.type === 'text') return sum + (part.text?.length || 0);
+      return sum + JSON.stringify(part ?? '').length;
+    }, 0);
+  }
+  return JSON.stringify(content ?? '').length;
+}
+
+// One call's share of the group's input tokens, and the meta fields every
+// record for that call shares regardless of how many rows it fans out into.
+function attribute(call, group, inputTokens, total) {
+  const tokensAttributed = Math.round(
+    total > 0 ? (inputTokens * call.resultBytes) / total : inputTokens / group.calls.length,
+  );
+  return {
+    session_id: group.sessionId,
+    request_id: group.requestId,
+    tool_use_id: call.toolUseId,
+    tool_name: call.toolName,
+    tool_source: call.toolSource,
+    model: group.model,
+    effort: group.effort,
+    query_source: group.isSidechain ? 'subagent' : 'main',
+    git_branch: group.gitBranch,
+    project: group.project,
+    result_bytes: String(call.resultBytes),
+    // Proportional split. With no result bytes at all (every result empty),
+    // split evenly so the total is not lost.
+    tokens_attributed: String(tokensAttributed),
+  };
+}
+
+// Attributes the input tokens of the next assistant message to the tools called
+// in the group, proportionally to each one's result size.
+//
+// A Bash call with recognized sub-commands fans out into one row per
+// occurrence, reusing the mcp_server/mcp_tool slot (mcp_server="bash",
+// mcp_tool=<command>) so it joins the same breakdown table MCP calls already
+// populate, instead of needing a panel of its own. Known tradeoff: a compound
+// line like `git status && ls` attributes the WHOLE call's tokens to both
+// `git` and `ls`, not a split between them — token cost belongs to the LLM
+// turn, not to an individual shell command within it, so this is treated as
+// an acceptable approximation rather than something worth a proportional
+// split of its own.
+function settle(group, inputTokens) {
+  const total = group.calls.reduce((sum, call) => sum + call.resultBytes, 0);
+  return group.calls.flatMap((call) => {
+    const timestampNs = `${Date.parse(call.timestamp)}000000`;
+    const meta = attribute(call, group, inputTokens, total);
+    if (!call.bashCommands?.length) {
+      return [{
+        timestampNs,
+        line: call.toolName,
+        meta: { ...meta, mcp_server: call.mcpServer, mcp_tool: call.mcpTool },
+      }];
+    }
+    return call.bashCommands.map((name, i) => ({
+      timestampNs,
+      line: call.toolName,
+      // Distinct per occurrence: settle() can emit several rows for the same
+      // tool_use_id, and dedup keys on that id otherwise.
+      dedupKey: `bash:${call.toolUseId}:${i}`,
+      meta: { ...meta, mcp_server: 'bash', mcp_tool: name },
+    }));
+  });
+}
+
+// Reads a transcript from the stored offset and returns the finished records.
+// `pending` carries, across runs, the groups still waiting for the next assistant
+// message — without it a tool_use landing on a poll boundary would be orphaned.
+async function processTranscript(path, fileState, pluginSkills, pluginSkillByRequest) {
+  const records = [];
+  // Pending groups are kept per track: the main thread must not be settled by a
+  // subagent's first message, which is a different conversation.
+  const pending = { main: fileState.pending?.main ?? null, sub: fileState.pending?.sub ?? null };
+  // Active skill per track. It holds from the "Skill" tool call until the next one
+  // — the same behaviour Claude Code uses for skill_name on api_request, where one
+  // skill marks hundreds of consecutive requests.
+  const activeSkill = { main: fileState.activeSkill?.main ?? '', sub: fileState.activeSkill?.sub ?? '' };
+  let offset = fileState.offset ?? 0;
+
+  const { size } = await stat(path);
+  if (size < offset) {
+    // File shrank: it was truncated or replaced. Start over.
+    log(`${basename(path)} shrank (${size} < ${offset}); re-reading from the start`);
+    offset = 0;
+    pending.main = pending.sub = null;
+    activeSkill.main = activeSkill.sub = '';
+  }
+  // activeSkill has to come back here too: this is the most common path (file with
+  // nothing new between polls), and omitting it erased the remembered active skill,
+  // dropping attribution back to "third-party".
+  if (size === offset) return { records, offset, pending, activeSkill };
+
+  const stream = createReadStream(path, { start: offset, encoding: 'utf8' });
+  const lines = createInterface({ input: stream, crlfDelay: Infinity });
+  let consumed = 0;
+  let pendente = 0;
+
+  for await (const line of lines) {
+    // readline yields the last line even without a trailing "\n" — which is the
+    // normal case here, since Claude Code writes to these files concurrently.
+    // Counting the "\n" before knowing it exists left the offset 1 byte ahead of
+    // the file, and the first byte of whatever got written next was skipped: that
+    // whole entry was lost, silently.
+    //
+    // So a line's length stays "pending" and only becomes offset once the NEXT
+    // line arrives, which proves the previous one ended in "\n".
+    consumed += pendente;
+    pendente = Buffer.byteLength(line, 'utf8') + 1;
+    if (!line.trim()) continue;
+
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue; // linha parcial ou corrompida; a próxima passada pega
+    }
+
+    const message = entry.message;
+    if (!message || typeof message !== 'object') continue;
+    const content = Array.isArray(message.content) ? message.content : [];
+    const track = entry.isSidechain ? 'sub' : 'main';
+
+    if (entry.type === 'assistant') {
+      const usage = message.usage;
+      // A plugin skill seen in this session. It does not become a record: the
+      // skill numbers come from OTel (see rebuildSkillRecords). All that is noted
+      // here is the real name, which is exactly what OTel redacts.
+      if (entry.sessionId && activeSkill[track]?.includes(':')) {
+        (pluginSkills[entry.sessionId] ??= new Set()).add(activeSkill[track]);
+        // The precise twin of the line above: WHICH request this skill was
+        // active for, not just that the session used it at some point.
+        if (entry.requestId) {
+          pluginSkillByRequest[entry.requestId] = {
+            skill: activeSkill[track],
+            ts: Date.parse(entry.timestamp) || Date.now(),
+          };
+        }
+      }
+      if (usage && pending[track]) {
+        const inputTokens = (usage.input_tokens || 0) + (usage.cache_creation_input_tokens || 0);
+        records.push(...settle(pending[track], inputTokens));
+        pending[track] = null;
+      }
+      const calls = content
+        .filter((block) => block?.type === 'tool_use')
+        .map((block) => ({
+          toolUseId: block.id || '',
+          toolName: block.name || '',
+          resultBytes: 0,
+          timestamp: entry.timestamp,
+          bashCommands: block.name === 'Bash' ? extractBashCommands(block.input?.command) : [],
+          ...parseToolName(block.name),
+        }));
+      // A chamada do tool "Skill" traz o nome real no input.
+      for (const block of content) {
+        if (block?.type === 'tool_use' && block.name === 'Skill' && block.input?.skill) {
+          activeSkill[track] = String(block.input.skill);
+        }
+      }
+      if (calls.length) {
+        pending[track] = {
+          sessionId: entry.sessionId || '',
+          requestId: entry.requestId || '',
+          model: message.model || '',
+          effort: entry.perTurnEffort || entry.effort || '',
+          gitBranch: entry.gitBranch || '',
+          project: entry.cwd ? basename(entry.cwd) : '',
+          isSidechain: Boolean(entry.isSidechain),
+          at: Date.parse(entry.timestamp) || Date.now(),
+          calls,
+        };
+      }
+    } else if (entry.type === 'user' && pending[track]) {
+      for (const block of content) {
+        if (block?.type !== 'tool_result') continue;
+        const call = pending[track].calls.find((candidate) => candidate.toolUseId === block.tool_use_id);
+        if (call) call.resultBytes = blockSize(block);
+      }
+    }
+  }
+
+  return { records, offset: offset + consumed, pending, activeSkill };
+}
+
+// ------------------------------------------------------------------ Loki
+
+async function lokiQuery(path, params) {
+  const url = new URL(path, LOKI_URL);
+  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Loki ${response.status} em ${path}: ${(await response.text()).slice(0, 200)}`);
+  const text = await response.text();
+  return text ? JSON.parse(text) : [];
+}
+
+// Transcripts do not record the account. The api_request event Claude Code sends
+// over OTel does, and shares the session_id — so the account comes from there,
+// once per session. Without it the MCP panel could not filter by account.
+async function resolveEmails(state, sessionIds) {
+  const missing = sessionIds.filter((id) => id && !state.sessionEmail[id]);
+  if (!missing.length) return;
+  const end = Date.now() * 1e6;
+  const start = end - EMAIL_LOOKBACK_HOURS * 3600 * 1e9;
+  for (const sessionId of missing) {
+    try {
+      const body = await lokiQuery('/loki/api/v1/query_range', {
+        query: `{service_name="claude-code"} | session_id = \`${sessionId}\` | user_email != \`\``,
+        start: String(start),
+        end: String(end),
+        limit: '1',
+        direction: 'backward',
+      });
+      const email = body?.data?.result?.[0]?.stream?.user_email;
+      // Mark as resolved even when nothing was found, otherwise every pass
+      // re-queries sessions that never sent OTel telemetry at all.
+      state.sessionEmail[sessionId] = email || '';
+    } catch (error) {
+      log(`could not resolve the account for session ${sessionId.slice(0, 8)}: ${error.message}`);
+    }
+  }
+}
+
+// Rebuilds the `seen` map from what is already in Loki. Runs when the map is
+// empty but exported data exists: an upgrade from an old state, a lost state
+// volume, or someone deleting the file. Without it, any of those would reimport
+// the whole history on top of what is already there.
+export async function seedSeenFromLoki(state) {
+  const windowMs = DEDUP_DAYS * 24 * 3600 * 1000;
+  const step = 24 * 3600 * 1000; // one day per query, to stay under the line limit
+  let total = 0;
+  for (let offset = 0; offset < windowMs; offset += step) {
+    const end = Date.now() - offset;
+    const start = end - step;
+    let body;
+    try {
+      body = await lokiQuery('/loki/api/v1/query_range', {
+        query: `{service_name="${STREAM}"}`,
+        start: String(start * 1e6),
+        end: String(end * 1e6),
+        limit: '5000',
+        direction: 'backward',
+      });
+    } catch (error) {
+      // "continue", not "return": aborting everything on the first error left the
+      // remaining days unseeded, and the startup guard never allows another try —
+      // those calls would come back as genuine duplicates.
+      log(`janela de semeadura falhou (${error.message}); seguindo para a próxima`);
+      continue;
+    }
+    for (const stream of body?.data?.result ?? []) {
+      const id = stream.stream?.tool_use_id;
+      if (!id) continue;
+      for (const [timestampNs] of stream.values ?? []) {
+        state.seen[id] = Math.round(Number(timestampNs) / 1e6);
+        total += 1;
+      }
+    }
+  }
+  if (total) log(`dedup seeded with ${Object.keys(state.seen).length} call(s) already in Loki`);
+}
+
+// Sessions older than this stack have no OTel event, so session_id cannot resolve
+// the account. The project can: if every ALREADY-attributed session of a directory
+// belongs to the same account, the orphans from that directory belong to it too.
+// It only attributes when there is no ambiguity — a project with two accounts is
+// left alone. Measured on this machine: recovers ~82% of orphaned lines, 0
+// ambiguous.
+//
+// `batch` is the set being exported right now. Without it a from-scratch import
+// never infers anything: the map would come only from what is already in Loki,
+// which is empty precisely because this is the first import.
+async function projectOwners(lokiUrl, batch = []) {
+  const owners = new Map();
+  const end = Date.now();
+  const start = end - DEDUP_DAYS * 24 * 3600 * 1000;
+  let body;
+  try {
+    body = await lokiQuery('/loki/api/v1/query_range', {
+      query: `{service_name="${STREAM}", kind="tools"}`,
+      start: String(start * 1e6),
+      end: String(end * 1e6),
+      limit: '5000',
+      direction: 'backward',
+    });
+  } catch (error) {
+    log(`Loki history unavailable for the project->account map (${error.message});`
+      + ' using only the current batch');
+    body = null;
+  }
+  const seen = new Map();
+  const note = (project, email) => {
+    if (!project || !email) return;
+    if (!seen.has(project)) seen.set(project, new Set());
+    seen.get(project).add(email);
+  };
+  for (const stream of body?.data?.result ?? []) {
+    note(stream.stream?.project, stream.stream?.user_email);
+  }
+  for (const record of batch) note(record.meta.project, record.meta.user_email);
+  for (const [project, emails] of seen) {
+    if (emails.size === 1) owners.set(project, [...emails][0]);
+  }
+  return owners;
+}
+
+// The per-skill numbers come from OTel, not from the transcript.
+//
+// The opposite was tried first and was wrong: the transcript does not mirror OTel
+// (subagents and rotated sessions never show up in it), and a skill can be
+// activated proactively, with no "Skill" tool call — measured, transcript-based
+// attribution was off by -87% on one skill and -100% on two others.
+//
+// So this step re-reads from Loki the requests OTel tagged with a skill and
+// republishes them with ONE adjustment: Claude Code replaces a PLUGIN skill's
+// name with "third-party", and the transcript knows what it was. That is what
+// makes the skills panel reconcile exactly with the weekly breakdown table, which
+// reads the same source.
+async function rebuildSkillRecords(state, pluginSkills, pluginSkillByRequest, fullHistory) {
+  const out = [];
+  // Scans OTel directly rather than the session list from the transcripts: not
+  // every session has a transcript on this machine (another config dir, a rotated
+  // file), and going session by session lost two thirds of the volume.
+  const days = fullHistory ? DEDUP_DAYS : 2;
+  const LIMIT = 5000;
+
+  // Loki caps the response at an entry limit, and a saturated window comes back
+  // truncated in silence — that is how 39% of the volume went missing. When a
+  // window saturates it is split in half and retried.
+  async function fetchWindow(start, end, depth = 0) {
+    let body;
+    try {
+      body = await lokiQuery('/loki/api/v1/query_range', {
+        query: '{service_name="claude-code"} | event_name = `api_request` | skill_name != ``',
+        start: String(start * 1e6),
+        end: String(end * 1e6),
+        limit: String(LIMIT),
+      });
+    } catch (error) {
+      log(`OTel skills unavailable for that window: ${error.message}`);
+      return [];
+    }
+    const streams = body?.data?.result ?? [];
+    const total = streams.reduce((sum, stream) => sum + (stream.values?.length ?? 0), 0);
+    if (total >= LIMIT && end - start > 60_000 && depth < 12) {
+      const meio = Math.floor((start + end) / 2);
+      return [...await fetchWindow(start, meio, depth + 1),
+              ...await fetchWindow(meio, end, depth + 1)];
+    }
+    return streams;
+  }
+
+  const step = 24 * 3600 * 1000;
+  for (let offset = 0; offset < days * step; offset += step) {
+    const end = Date.now() - offset;
+    const streams = await fetchWindow(end - step, end);
+    for (const stream of streams) {
+      const meta = stream.stream ?? {};
+      const sessionId = meta.session_id || '';
+      // Precise first: which skill was active AT THIS SPECIFIC request.
+      // Falls back to the session-wide set only for requests that predate this
+      // per-request tracking — there "third-party" can still only be undone
+      // when the session used exactly one plugin skill, since with two there
+      // is no way to tell which is which.
+      const candidatos = pluginSkills[sessionId];
+      const real = pluginSkillByRequest[meta.request_id]?.skill
+        ?? (candidatos?.size === 1 ? [...candidatos][0] : null);
+      const skill = meta.skill_name === 'third-party' && real ? real : (meta.skill_name || '');
+      if (!skill || !meta.request_id) continue;
+      // "owner" as a field of its own, rather than letting the dashboard filter by
+      // regex over the name. A Grafana filter's options are serialized into a
+      // comma-separated "text : value" string, and a value containing ":" (which
+      // "superpowers:.*" does) is truncated when re-parsed — the filter then
+      // matched nothing at all.
+      const dono = skill.includes(':') ? skill.split(':')[0] : 'local';
+      for (const [timestampNs] of stream.values ?? []) {
+        out.push({
+          stream: SKILL_STREAM_LABELS,
+          dedupKey: `skill:${meta.request_id}`,
+          timestampNs,
+          line: skill,
+          meta: {
+            skill,
+            skill_owner: dono,
+            session_id: sessionId,
+            request_id: meta.request_id,
+            model: meta.model || '',
+            effort: meta.effort || '',
+            query_source: meta.query_source || '',
+            project: '',
+            tokens: String(
+              Number(meta.input_tokens || 0)
+              + Number(meta.output_tokens || 0)
+              + Number(meta.cache_creation_tokens || 0),
+            ),
+            user_email: meta.user_email || '',
+            account_source: 'otel',
+          },
+        });
+      }
+    }
+  }
+  return out;
+}
+
+// Returns { pushed, skipped }: records Loki actually accepted, and records it
+// rejected as "too far behind" its per-stream chunk boundary (a live stream's
+// chunks close over time, and once closed Loki can no longer take a write
+// landing inside that already-flushed window — distinct from
+// reject_old_samples, which only guards against age relative to wall clock
+// and is already off). That rejection is NOT retryable by waiting, so it
+// must not abort the whole batch: a `--rescan` on a stream that already has
+// live, recent data would otherwise lose every later (in-range) batch too,
+// because they never get attempted. The caller must only mark `pushed`
+// records as seen — a `skipped` one has to stay eligible for a future
+// attempt (e.g. once Loki's own retention ages the blocking chunk out).
+async function pushToLoki(records) {
+  if (!records.length || DRY_RUN) return { pushed: [], skipped: [] };
+  // Ordena por timestamp antes de empurrar. O Loki rejeita escrita muito fora de
+  // ordem dentro de um stream, e o backfill inicial varre vários arquivos que se
+  // intercalam no tempo.
+  const ordered = [...records].sort((a, b) => Number(BigInt(a.timestampNs) - BigInt(b.timestampNs)));
+  const pushed = [];
+  const skipped = [];
+  for (let i = 0; i < ordered.length; i += BATCH_SIZE) {
+    const chunk = ordered.slice(i, i + BATCH_SIZE);
+    // Records go to different streams (tools and skills), so group by stream
+    // before building the payload.
+    const byStream = new Map();
+    for (const record of chunk) {
+      const labels = record.stream ?? STREAM_LABELS;
+      const key = JSON.stringify(labels);
+      if (!byStream.has(key)) byStream.set(key, { stream: labels, values: [] });
+      byStream.get(key).values.push([record.timestampNs, record.line, record.meta]);
+    }
+    const payload = { streams: [...byStream.values()] };
+    // On a cold start Loki accepts the connection before the ingester is ready and
+    // answers "empty ring". Its image has no shell utilities for a compose
+    // healthcheck, so the waiting happens here.
+    let lastError;
+    let tooOld = false;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      if (attempt) await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
+      const response = await fetch(new URL('/loki/api/v1/push', LOKI_URL), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }).catch((error) => ({ ok: false, status: 0, text: async () => error.message }));
+      if (response.ok) { lastError = null; break; }
+      const body = await response.text();
+      lastError = `push falhou ${response.status}: ${body.slice(0, 200)}`;
+      if (response.status === 400 && /too far behind/i.test(body)) { tooOld = true; break; }
+      // 429 is the exception among 4xx: it means "too fast", not "invalid" —
+      // confirmed live during a full reimport (a fresh stream backfilling 90
+      // days pushes many ~700KB batches back to back and outruns Loki's
+      // per-user ingestion rate limit). It goes through the same backoff as a
+      // 5xx instead of aborting the pass immediately.
+      if (response.status !== 429 && response.status >= 400 && response.status < 500) break;
+    }
+    // Paced even after a clean push: bursting one BATCH_SIZE payload right
+    // after another is exactly what tripped the 429 above during a full
+    // reimport. A fixed small gap keeps sustained throughput under the
+    // per-user rate limit without needing to know its exact value.
+    if (!lastError && i + BATCH_SIZE < ordered.length) {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+    if (tooOld) {
+      log(`${chunk.length} record(s) rejected as too old by Loki, skipped: ${lastError}`);
+      skipped.push(...chunk);
+      continue;
+    }
+    if (lastError) throw new Error(lastError);
+    pushed.push(...chunk);
+  }
+  return { pushed, skipped };
+}
+
+// ------------------------------------------------------------------ loop
+
+// Resuming a session (`claude --resume`, a fork) makes Claude Code rewrite the
+// entire history into a NEW transcript: same request_id, same tool_use_id, same
+// timestamp, only session_id differs. Without filtering that, every resume counts
+// the original session's tools again and inflates the attribution.
+// tool_use_id is unique per real call, so that is the key.
+function dropAlreadySeen(state, records) {
+  const cutoff = Date.now() - DEDUP_DAYS * 24 * 3600 * 1000;
+  for (const id of Object.keys(state.seen)) {
+    if (state.seen[id] < cutoff) delete state.seen[id];
+  }
+  const fresh = [];
+  const novos = new Map();
+  for (const record of records) {
+    const id = record.dedupKey || record.meta.tool_use_id;
+    if (!id) { fresh.push(record); continue; }
+    if (state.seen[id] || novos.has(id)) continue;
+    novos.set(id, Math.round(Number(record.timestampNs) / 1e6));
+    fresh.push(record);
+  }
+  return { fresh, novos };
+}
+
+export async function runPass(state) {
+  // Must be read BEFORE processing the transcripts: processing them populates
+  // state.files, and the full-history scan then believed it was an incremental
+  // pass — silently, only the last 2 days made it in.
+  const primeiraPassada = Object.keys(state.files).length === 0;
+  const files = await findAllTranscripts(CONFIG_DIRS);
+  const collected = [];
+  // Offset advances and dedup marks stay here until the push succeeds. They used
+  // to be applied straight onto `state`; with Loki down, the in-memory object had
+  // already moved on and those records were never re-read for as long as the
+  // process lived — a silent, permanent loss.
+  const atualizacoes = new Map();
+  // sessionId -> Set(nomes reais). Semeado do estado persistido e devolvido para
+  // ele no fim da passada.
+  const pluginSkills = {};
+  for (const [sessionId, nomes] of Object.entries(state.pluginSkills ?? {})) {
+    pluginSkills[sessionId] = new Set(nomes);
+  }
+  // request_id -> { skill, ts }. Same idea, finer grain — see emptyState().
+  // Pruned to the same DEDUP_DAYS window rebuildSkillRecords ever looks back
+  // to, otherwise this grows forever with entries nothing will ever read again.
+  const pluginSkillByRequest = {};
+  const pluginSkillCutoff = Date.now() - DEDUP_DAYS * 24 * 3600 * 1000;
+  for (const [requestId, info] of Object.entries(state.pluginSkillByRequest ?? {})) {
+    if (info?.ts >= pluginSkillCutoff) pluginSkillByRequest[requestId] = info;
+  }
+
+  for (const path of files) {
+    const fileState = state.files[path] ?? { offset: 0, pending: null, activeSkill: null };
+    try {
+      const { records, offset, pending, activeSkill } =
+        await processTranscript(path, fileState, pluginSkills, pluginSkillByRequest);
+
+      // A pending group this old means a session that ended with no assistant
+      // reply. It goes out with zero attribution so it does not vanish from the
+      // counts.
+      for (const track of ['main', 'sub']) {
+        const group = pending[track];
+        if (group && Date.now() - group.at > ORPHAN_AFTER_MS) {
+          records.push(...settle(group, 0));
+          pending[track] = null;
+        }
+      }
+
+      collected.push(...records);
+      // Held aside: it only enters the state once the push confirms.
+      atualizacoes.set(path, { offset, pending, activeSkill });
+    } catch (error) {
+      log(`failed reading ${basename(path)}: ${error.message}`);
+    }
+  }
+
+  collected.push(...await rebuildSkillRecords(state, pluginSkills, pluginSkillByRequest, primeiraPassada));
+
+  const { fresh, novos: novosVistos } = dropAlreadySeen(state, collected);
+  const skipped = collected.length - fresh.length;
+  if (skipped) log(`${skipped} call(s) skipped: already exported (resumed session)`);
+  const confirmar = () => {
+    for (const [path, st] of atualizacoes) state.files[path] = st;
+    for (const [id, ts] of novosVistos) state.seen[id] = ts;
+    for (const [sessionId, nomes] of Object.entries(pluginSkills)) {
+      state.pluginSkills[sessionId] = [...nomes];
+    }
+    state.pluginSkillByRequest = pluginSkillByRequest;
+  };
+  if (!fresh.length) {
+    // Nothing new to write, but the file offsets did move forward.
+    if (collected.length) { confirmar(); await saveState(state); }
+    return 0;
+  }
+  collected.length = 0;
+  collected.push(...fresh);
+
+  await resolveEmails(state, [...new Set(collected.map((record) => record.meta.session_id))]);
+  for (const record of collected) {
+    if (record.meta.user_email) continue; // skill records already carry the account from OTel
+    record.meta.user_email = state.sessionEmail[record.meta.session_id] || '';
+    record.meta.account_source = record.meta.user_email ? 'otel' : '';
+  }
+
+  // Second attempt for what OTel could not resolve: the project's owner.
+  if (collected.some((record) => !record.meta.user_email)) {
+    const owners = await projectOwners(LOKI_URL, collected);
+    for (const record of collected) {
+      if (record.meta.user_email) continue;
+      const owner = owners.get(record.meta.project);
+      if (!owner) continue;
+      record.meta.user_email = owner;
+      // Marked so it stays auditable: this account was inferred, not observed.
+      record.meta.account_source = 'project';
+    }
+  }
+
+  if (DRY_RUN) summarize(collected);
+  const { pushed, skipped: rejected } = await pushToLoki(collected);
+  // A record Loki rejected as too old must not be marked seen — leaving its
+  // dedup entry out keeps it eligible for a later attempt, instead of being
+  // silently and permanently dropped.
+  for (const record of rejected) {
+    novosVistos.delete(record.dedupKey || record.meta.tool_use_id);
+  }
+  confirmar();
+  await saveState(state);
+  return pushed.length;
+}
+
+// Under --dry-run, shows what would be written: this is how token attribution
+// gets checked without polluting Loki.
+function summarize(records) {
+  const tally = (rows, keyOf, valueOf) => {
+    const acc = new Map();
+    for (const row of rows) {
+      const key = keyOf(row);
+      const entry = acc.get(key) ?? { n: 0, tokens: 0 };
+      entry.n += 1;
+      entry.tokens += valueOf(row);
+      acc.set(key, entry);
+    }
+    return [...acc.entries()].sort((a, b) => b[1].tokens - a[1].tokens);
+  };
+  const show = (title, rows) => {
+    if (!rows.length) return;
+    const total = rows.reduce((sum, [, entry]) => sum + entry.tokens, 0);
+    log(`--- ${title}: ${total.toLocaleString('en-US')} tokens ---`);
+    for (const [key, entry] of rows.slice(0, 20)) {
+      log(`  ${key.padEnd(36)} ${String(entry.n).padStart(5)}x  ${entry.tokens.toLocaleString('en-US').padStart(12)} tokens`);
+    }
+  };
+  const tools = records.filter((record) => record.meta.tool_name);
+  const skills = records.filter((record) => record.meta.skill);
+  show('TOOLS', tally(tools,
+    (r) => (r.meta.tool_source === 'mcp' ? `mcp:${r.meta.mcp_server}`
+      : r.meta.mcp_tool ? `bash:${r.meta.mcp_tool}` : `builtin:${r.meta.tool_name}`),
+    (r) => Number(r.meta.tokens_attributed)));
+  show('SKILLS', tally(skills, (r) => r.meta.skill, (r) => Number(r.meta.tokens)));
+}
+
+
+
+// Loads state, applies --rescan, and seeds the dedup map on an empty one.
+// Must run once before the first runPass — collector.mjs calls this at
+// startup instead of transcript-scan.mjs owning its own loop.
+export async function initState() {
+  log(`transcripts: ${CONFIG_DIRS.join(', ')}`);
+  log(`loki: ${LOKI_URL}${DRY_RUN ? '  (dry-run)' : ''}`);
+  const state = await loadState();
+  if (RESCAN) {
+    log('RESCAN: zeroing offsets, keeping the dedup map');
+    state.files = {};
+  }
+  const firstRun = Object.keys(state.files).length === 0;
+  if (firstRun) log('first run: importing the full transcript history');
+  if (!Object.keys(state.seen).length) await seedSeenFromLoki(state);
+  return state;
+}

@@ -1,0 +1,46 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  debug:
+    verbosity: basic
+
+  # Claude Code tool_result/tool_decision/api_request events -> Loki, native
+  # OTLP ingestion. This is where real MCP tool/server names live
+  # (tool_name = mcp__<server>__<tool>), unlike the metrics Claude Code used to
+  # also emit, where user-configured MCP servers are redacted to "custom".
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+
+service:
+  telemetry:
+    metrics:
+      level: none
+  pipelines:
+    # Metrics are still accepted so nothing breaks if a client sends them, but
+    # there is no backend for them: every panel reads from the logs pipeline
+    # below (Loki), and the only thing metrics used to be for — listing which
+    # accounts exist via Prometheus label_values — is now a Loki query instead
+    # (see discoverAccounts in collector/dashboard-generator.mjs).
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]
+    # Traces are still accepted so nothing breaks if a client sends them;
+    # they only go to the collector log for now. Wire a real backend when needed.
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/loki, debug]

@@ -1,0 +1,40 @@
+{
+  "_comment": [
+    "TEMPLATE. Copy to account-limits.json and adjust — the real file is not",
+    "versioned because it contains email addresses (same rule as the .gitignore",
+    "entry for grafana/dashboards/accounts/).",
+    "",
+    "Limit references per account, in NEW TOKENS (input + output + cache creation).",
+    "Anthropic does not expose the limit through any telemetry, and it varies by",
+    "plan — hence per account rather than a single number.",
+    "",
+    "CALIBRATION IS AUTOMATIC NOW: collector/usage-truth.mjs runs /usage per",
+    "account every pass and writes block_5h/week here itself, applying the same",
+    "formula this used to ask you to run by hand: limit = meter_tokens /",
+    "(usage_percentage / 100), against what the meter published to Loki at that",
+    "moment ({service_name=\"claude-code-usage\"} | user_email = `<email>`). It",
+    "also writes week_start_day/week_start_hour — the account's REAL weekly reset",
+    "moment, parsed from /usage's own text, which usage-meter.mjs uses instead of",
+    "the global WEEK_START_DAY/WEEK_START_HOUR guess in .env. To calibrate by",
+    "hand instead, apply the same formula and edit block_5h/week directly.",
+    "",
+    "Accounts with no entry under 'accounts' fall back to the 'default' block.",
+    "'ignore': accounts that should not get a dashboard. Useful for a deactivated",
+    "or third-party account that still shows up in old Prometheus labels until",
+    "retention expires."
+  ],
+  "default": {
+    "block_5h": 1750000,
+    "week": 21500000
+  },
+  "accounts": {
+    "you@example.com": {
+      "block_5h": 1750000,
+      "week": 21500000,
+      "week_start_day": 1,
+      "week_start_hour": 0,
+      "_calibrated": "YYYY-MM-DDTHH:MM:SS.sssZ auto from /usage = X% (block), Y% (week)"
+    }
+  },
+  "ignore": []
+}

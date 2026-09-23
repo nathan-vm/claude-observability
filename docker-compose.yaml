@@ -1,0 +1,89 @@
+name: claude-observability
+
+# Every port is published on 127.0.0.1 on purpose, not on the 0.0.0.0 Docker
+# uses by default. Without that, any device on the same network reaches: Grafana
+# with anonymous Viewer access (emails, cost, tool names), the Loki API with no
+# authentication at all (including the delete endpoint), and the OTLP receiver,
+# which would happily accept forged telemetry into your dashboards.
+
+services:
+  # Single OTLP ingest endpoint. Every Claude Code session sends here.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.160.0
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./config/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "127.0.0.1:47317:4317"   # OTLP gRPC  (uncommon host port)
+      - "127.0.0.1:47318:4318"   # OTLP HTTP  (uncommon host port)
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+  # Log/event store. Holds two things: the Claude Code OTel events (api_request,
+  # tool_result, ...) and the tool calls the collector extracts from the
+  # local transcripts.
+  #
+  # Note: Claude Code redacts MCP names across ALL OTel telemetry — "custom" in
+  # the metrics and "mcp_tool" in the tool_result log. The real name only exists
+  # in the transcripts, which is why the collector reads them directly.
+  loki:
+    image: grafana/loki:latest
+    command: ["-config.file=/etc/loki/loki-config.yaml"]
+    ports:
+      - "127.0.0.1:47100:3100"
+    volumes:
+      - ./config/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki-data:/loki
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_NAME=Main Org.
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_DEFAULT_THEME=dark
+      # Everything below turns off background loops this local stack has no use
+      # for. Unified alerting keeps a scheduler running even with zero rules, and
+      # the version/analytics checks make periodic outbound HTTP — on a laptop
+      # that is battery spent for nothing.
+      - GF_UNIFIED_ALERTING_ENABLED=false
+      - GF_ALERTING_ENABLED=false
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_ANALYTICS_CHECK_FOR_UPDATES=false
+      - GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES=false
+      - GF_NEWS_NEWS_FEED_ENABLED=false
+      - GF_LOG_LEVEL=warn
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:47300:3000"
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+# Everything that used to run here as dashboard-generator and
+# transcript-exporter containers is now collector/collector.mjs, ONE host
+# process (not a container) run as a launchd service — see
+# bin/install-service.sh and README.md's "The collector service".
+#
+# Why it moved off Docker: it has to run the `claude` CLI (for the /usage
+# ground-truth capture) with your logged-in account's own credentials, and it
+# has to read your real Claude Code config directories (~/.claude-personal,
+# ~/.claude-work, ...) at their real paths — neither is something a
+# node:22-alpine container has access to. `docker compose up -d` here only
+# gets you otel-collector + loki + grafana; the collector needs starting
+# separately, once, via bin/install-service.sh install.
+
+# WARNING: "docker compose down -v" wipes ALL of these volumes — 90 days of
+# metrics and logs. Irreversible, with no extra confirmation. The collector's
+# own state (transcript dedup, offsets) lives on disk in .state/ now, not in
+# a Docker volume — removing that directory does the equivalent for it.
+volumes:
+  grafana-data:
+  loki-data:

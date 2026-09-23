@@ -1,0 +1,18 @@
+# Tudo abaixo é específico desta máquina: contém emails ou é derivado. Cada
+# entrada tem um modelo versionado ao lado, quando aplicável.
+
+# Dashboards gerados por collector/dashboard-generator.mjs, um por conta.
+# Derivados do template e nomeados pelo email.
+grafana/dashboards/accounts/
+
+# Limites por conta e lista de contas ignoradas — contém emails. Recalibrado
+# automaticamente pelo collector (usage-truth.mjs).
+# Modelo: grafana/account-limits.example.json
+grafana/account-limits.json
+
+# Estado do collector: offsets de transcript, dedup, log do launchd. Derivado —
+# perder isto só custa um re-scan completo na próxima passada.
+.state/
+
+# Git worktrees (local dev convenience, not part of the repo).
+.worktrees/
