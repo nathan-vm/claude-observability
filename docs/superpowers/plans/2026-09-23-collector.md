@@ -2164,7 +2164,16 @@ to depth 12 or until the window is under 60 seconds wide.
 Append to `collector/internal/transcriptscan/transcriptscan_test.go`:
 ```go
 func TestRebuildSkillRecords_PerRequestOverridesThirdParty(t *testing.T) {
+	// fullHistory=false makes RebuildSkillRecords loop 2 day-windows; a
+	// real Loki would only return this event within its true window, but
+	// this fixture doesn't filter by start/end, so it only answers the
+	// FIRST call to avoid an artificial duplicate.
+	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) > 1 {
+			w.Write([]byte(`{"status":"success","data":{"resultType":"streams","result":[]}}`))
+			return
+		}
 		w.Write([]byte(`{"status":"success","data":{"resultType":"streams","result":[
 			{"stream":{"session_id":"s1","request_id":"r1","skill_name":"third-party","model":"claude","input_tokens":"10","output_tokens":"20","cache_creation_tokens":"0"},"values":[["1700000000000000000","x"]]}
 		]}}`))
@@ -2196,7 +2205,12 @@ func TestRebuildSkillRecords_PerRequestOverridesThirdParty(t *testing.T) {
 }
 
 func TestRebuildSkillRecords_SessionLevelFallbackWhenUnambiguous(t *testing.T) {
+	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) > 1 {
+			w.Write([]byte(`{"status":"success","data":{"resultType":"streams","result":[]}}`))
+			return
+		}
 		w.Write([]byte(`{"status":"success","data":{"resultType":"streams","result":[
 			{"stream":{"session_id":"s1","request_id":"r-unseen","skill_name":"third-party"},"values":[["1700000000000000000","x"]]}
 		]}}`))
@@ -2214,7 +2228,12 @@ func TestRebuildSkillRecords_SessionLevelFallbackWhenUnambiguous(t *testing.T) {
 }
 
 func TestRebuildSkillRecords_NonThirdPartyUsesOTelNameAsIs(t *testing.T) {
+	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) > 1 {
+			w.Write([]byte(`{"status":"success","data":{"resultType":"streams","result":[]}}`))
+			return
+		}
 		w.Write([]byte(`{"status":"success","data":{"resultType":"streams","result":[
 			{"stream":{"session_id":"s1","request_id":"r1","skill_name":"local-skill"},"values":[["1700000000000000000","x"]]}
 		]}}`))
@@ -2266,7 +2285,14 @@ func TestRebuildSkillRecords_SplitsSaturatedWindow(t *testing.T) {
 }
 ```
 
-Add `"strconv"` to the test file's imports if not already present (it is, from other tests in this package by this point).
+Add `"fmt"` and `"sync/atomic"` to the test file's imports (`"strconv"` is
+already present from earlier tasks). `sync/atomic` is needed by the
+call-counter pattern in three of the tests above: `RebuildSkillRecords`
+genuinely loops 2 day-windows when `fullHistory=false`, and since these
+fixtures don't filter by the requested start/end (unlike a real Loki,
+which would only return an event within its true window), they only
+answer the first call and return empty afterward, to avoid an artificial
+duplicate that the real implementation wouldn't produce against real data.
 
 - [ ] **Step 2: Run tests to verify they fail**
 

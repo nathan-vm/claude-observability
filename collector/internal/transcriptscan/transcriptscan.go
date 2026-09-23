@@ -531,3 +531,110 @@ func DropAlreadySeen(seen map[string]int64, dedupDays int, records []Record) (fr
 	}
 	return fresh, novos
 }
+
+const skillFetchLimit = 5000
+
+// fetchSkillWindow queries one time window for skill-tagged api_request
+// events. Loki caps the response at skillFetchLimit and a saturated
+// window comes back truncated in silence — when a window is at/over the
+// limit, it's split in half and retried (depth-limited, and never below
+// 60s wide, to bound the recursion).
+func fetchSkillWindow(lokiURL string, startNs, endNs int64, depth int, log func(string, ...any)) []lokiclient.StreamResult {
+	results, err := lokiclient.QueryRange(lokiURL,
+		"{service_name=\"claude-code\"} | event_name = `api_request` | skill_name != ``",
+		startNs, endNs, skillFetchLimit, "")
+	if err != nil {
+		log("OTel skills unavailable for that window: %v", err)
+		return nil
+	}
+	total := 0
+	for _, r := range results {
+		total += len(r.Values)
+	}
+	if total >= skillFetchLimit && endNs-startNs > 60_000*1_000_000 && depth < 12 {
+		mid := (startNs + endNs) / 2
+		out := fetchSkillWindow(lokiURL, startNs, mid, depth+1, log)
+		out = append(out, fetchSkillWindow(lokiURL, mid, endNs, depth+1, log)...)
+		return out
+	}
+	return results
+}
+
+// RebuildSkillRecords re-reads OTel's own api_request events tagged with
+// a skill (rather than the transcript) and republishes them with ONE
+// adjustment: when OTel redacted the name to "third-party" (any plugin
+// skill), the transcript-derived real name is substituted in, using the
+// per-request resolution first and falling back to the session-level set
+// only when it has exactly one candidate (unambiguous).
+func RebuildSkillRecords(lokiURL, exporterStream string, dedupDays int, pluginSkills map[string]map[string]bool, pluginSkillByRequest map[string]state.PluginSkillRequest, fullHistory bool, log func(string, ...any)) ([]Record, error) {
+	days := 2
+	if fullHistory {
+		days = dedupDays
+	}
+	const step = 24 * 3600 * 1_000_000_000 // 1 day, in nanoseconds
+	nowNs := time.Now().UnixNano()
+
+	var out []Record
+	for offset := int64(0); offset < int64(days)*step; offset += step {
+		end := nowNs - offset
+		results := fetchSkillWindow(lokiURL, end-step, end, 0, log)
+		for _, r := range results {
+			sessionID := r.Labels["session_id"]
+			requestID := r.Labels["request_id"]
+			skillName := r.Labels["skill_name"]
+
+			var real string
+			if req, ok := pluginSkillByRequest[requestID]; ok {
+				real = req.Skill
+			} else if candidates := pluginSkills[sessionID]; len(candidates) == 1 {
+				for s := range candidates {
+					real = s
+				}
+			}
+			skill := skillName
+			if skillName == "third-party" && real != "" {
+				skill = real
+			}
+			if skill == "" || requestID == "" {
+				continue
+			}
+			owner := "local"
+			if idx := strings.Index(skill, ":"); idx >= 0 {
+				owner = skill[:idx]
+			}
+
+			inputT := r.Labels["input_tokens"]
+			outputT := r.Labels["output_tokens"]
+			cacheT := r.Labels["cache_creation_tokens"]
+			tokens := parseIntOr0(inputT) + parseIntOr0(outputT) + parseIntOr0(cacheT)
+
+			for _, v := range r.Values {
+				out = append(out, Record{
+					TimestampNs:  v[0],
+					Line:         skill,
+					DedupKey:     "skill:" + requestID,
+					StreamLabels: map[string]string{"service_name": exporterStream, "kind": "skills"},
+					Meta: map[string]string{
+						"skill":          skill,
+						"skill_owner":    owner,
+						"session_id":     sessionID,
+						"request_id":     requestID,
+						"model":          r.Labels["model"],
+						"effort":         r.Labels["effort"],
+						"query_source":   r.Labels["query_source"],
+						"project":        "",
+						"tokens":         strconv.FormatInt(tokens, 10),
+						"user_email":     r.Labels["user_email"],
+						"account_source": "otel",
+					},
+				})
+			}
+		}
+	}
+	return out, nil
+}
+
+func parseIntOr0(s string) int64 {
+	n, _ := strconv.ParseInt(s, 10, 64)
+	return n
+}
