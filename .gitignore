@@ -16,3 +16,13 @@ grafana/account-limits.json
 
 # Git worktrees (local dev convenience, not part of the repo).
 .worktrees/
+
+# Stray binaries from a plain `go build ./...` run inside a module root
+# (no -o given) — named after the cmd/ subdirectory, e.g. `go build ./...`
+# from setup/ produces setup/setup.
+/setup/setup
+/setup/setup.exe
+/dash-generator/dash-generator
+/dash-generator/dash-generator.exe
+/collector/collector
+/collector/collector.exe

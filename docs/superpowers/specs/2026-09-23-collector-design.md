@@ -6,12 +6,12 @@ Status: approved-pending-review
 ## Context
 
 Third and last piece of the Node-free collector architecture (see
-`2026-09-23-dashboard-server-design.md` for the wizard/collector/
-dashboard-server split and why). This spec covers **collector**: the
+`2026-09-23-dash-generator-design.md` for the wizard/collector/
+dash-generator split and why). This spec covers **collector**: the
 per-user, local-only binary that ports `transcript-scan.mjs` (1013 lines)
 and a simplified `usage-truth.mjs`. Both need things only the user's own
 machine has — the local transcript files, and a `claude` CLI logged into
-the user's own account — so unlike dashboard-server, this cannot run
+the user's own account — so unlike dash-generator, this cannot run
 anywhere but each monitored machine.
 
 `transcript-scan.mjs` is the highest-risk file in this whole rewrite to
@@ -22,7 +22,7 @@ subagent transcripts; a rate cutline that read 782k when the real P75 was
 about exact behavior — every constant, regex, and edge case below was
 read directly from the source, not summarized from memory.
 
-**What's explicitly dropped, decided already in the dashboard-server
+**What's explicitly dropped, decided already in the dash-generator
 spec:** `usage-meter.mjs` (LogQL block-boundary heuristics) is gone
 entirely. That kills `usage-truth.mjs`'s calibration math too (
 `parseResetWeekday`, `meterTokens`, the block_5h/week back-computation
@@ -43,14 +43,14 @@ and publish, no calibration.
   language one; Go's `os/exec` spawns it exactly like Node's
   `child_process.execFile` did).
 - Same cross-platform build/release story as `setup/` and
-  `dashboard-server/`.
+  `dash-generator/`.
 
 ## Non-goals
 
-- Rate metering, dashboard generation (dashboard-server's job, already
+- Rate metering, dashboard generation (dash-generator's job, already
   shipped).
 - `/usage`-based calibration of `account-limits.json` (dead, see above).
-- Changing the tools/skills Loki stream schema — dashboard-server's
+- Changing the tools/skills Loki stream schema — dash-generator's
   `dashboardgen` package already queries these streams by their existing
   field names; changing them here would break that without touching it.
 
@@ -75,16 +75,16 @@ collector/
   internal/state/state_test.go
   internal/transcriptscan/transcriptscan.go (the port of transcript-scan.mjs)
   internal/transcriptscan/transcriptscan_test.go
-  internal/lokiclient/lokiclient.go        (copy of dashboard-server's — see below)
+  internal/lokiclient/lokiclient.go        (copy of dash-generator's — see below)
   internal/lokiclient/lokiclient_test.go
   internal/usagetruth/usagetruth.go        (simplified port of usage-truth.mjs)
   internal/usagetruth/usagetruth_test.go
 .github/workflows/collector-release.yml
 ```
 
-`lokiclient` is intentionally duplicated from `dashboard-server/internal/
+`lokiclient` is intentionally duplicated from `dash-generator/internal/
 lokiclient` rather than shared via a third module — same reasoning as
-keeping `collector` and `dashboard-server` separate modules in the
+keeping `collector` and `dash-generator` separate modules in the
 first place: these are independently deployed binaries, and a shared
 internal module between them is coupling neither needs. It's ~40 lines;
 duplication is cheaper than the coordination cost of a shared module.
@@ -182,7 +182,7 @@ func Save(path string, st *State) error // write-temp-then-rename
 
 Deliberately **not** carrying over `otelSkills` (confirmed dead in the JS —
 declared in `emptyState()`, never read or written anywhere else) or
-`ratePublished` (now owned solely by dashboard-server's own state file).
+`ratePublished` (now owned solely by dash-generator's own state file).
 `version` stays `2` for continuity of intent, though this is a fresh file
 (`.state/collector-state.json`, not the JS's `.state/
 collector-state.json`) so no real migration happens — Go's `Load` just
@@ -191,7 +191,7 @@ needs to produce a valid zero-value `State` on ENOENT, matching the JS's
 
 ## `internal/lokiclient`
 
-Identical to `dashboard-server/internal/lokiclient` (`Query`,
+Identical to `dash-generator/internal/lokiclient` (`Query`,
 `QueryRange`, `Push`, `Series`/`Stream`/`StreamValue` types) — see that
 spec for the exact shape. Duplicated here per "Module layout" above.
 
@@ -211,7 +211,7 @@ const (
 `RATE_HALFLIFE_S`/`RATE_BACKFILL_DAYS` are **not** ported into this
 package — the fork's analysis confirmed they're pure passthrough exports
 in the JS, read internally only for `RATE_HALFLIFE`'s format validation
-(`^(\d+)([smh])$`), which is dashboard-server's concern now, not
+(`^(\d+)([smh])$`), which is dash-generator's concern now, not
 transcript-scan's. Nothing in this package's own logic uses any of them.
 
 ### Transcript discovery
@@ -380,7 +380,7 @@ Preserved exactly:
 - Any other 4xx aborts that chunk immediately (returns an error).
 - A fixed 300ms pace gap follows every successful non-final chunk push.
 
-### What gets published (unchanged stream schema — dashboard-server
+### What gets published (unchanged stream schema — dash-generator
 already queries these exact names/fields)
 
 **Tools stream** — labels `{service_name: <EXPORTER_STREAM>, kind:
@@ -484,14 +484,14 @@ deliberate property before:
   value smeared backward" to correct, because nothing ever computes a
   single current value and stamps it across a range — it's raw samples,
   each with the timestamp it was true at.
-- What this DOES require, tracked as a dashboard-server/template
+- What this DOES require, tracked as a dash-generator/template
   follow-up rather than a collector change: a time-series panel in
   `grafana/templates/claude-code.json` that plots `session_pct`/
   `week_pct` from `{service_name="claude-code-usage-truth"} | user_email
   =~ ...} | unwrap week_pct` (etc.) over the selected range, instead of
   (or alongside) an instant-value gauge. That's pure Grafana/LogQL
-  panel-JSON work — no Go code in either `collector` or `dashboard-server`
-  needs to change for it, so it can be added to the dashboard-server
+  panel-JSON work — no Go code in either `collector` or `dash-generator`
+  needs to change for it, so it can be added to the dash-generator
   implementation plan as a template-only task once that plan is written.
 - One accuracy caveat worth setting expectations on: the reset boundary
   in the graph will be accurate to within one `POLL_SECONDS` interval
@@ -499,11 +499,11 @@ deliberate property before:
   point immediately after the actual reset is whenever the next poll
   happens to land. Polling more often narrows this at the cost of more
   `claude -p /usage` invocations (a real cost since each spawns the CLI,
-  unlike the free-to-poll-often Loki-only work in `dashboard-server`).
+  unlike the free-to-poll-often Loki-only work in `dash-generator`).
 
 ## `cmd/collector/main.go`
 
-One loop (unlike dashboard-server's two — there's no dashboard cadence
+One loop (unlike dash-generator's two — there's no dashboard cadence
 here anymore):
 
 ```
@@ -521,20 +521,20 @@ Env vars: `CLAUDE_DIR`, `CLAUDE_OBSERVABILITY_EXTRA_DIRS`, `LOKI_URL`
 (default `<repo root>/.state/collector-state.json`).
 
 Requires being run from the repo root only for its default `STATE_FILE`
-location — unlike the wizard/dashboard-server, everything else it touches
+location — unlike the wizard/dash-generator, everything else it touches
 (config dirs, Loki) comes from env vars, not repo-relative paths, so
 `STATE_FILE` is the one value worth being able to override directly
 rather than enforcing a repo-root check.
 
 ## Wizard changes (`setup/`)
 
-The "Collector service" step (already repointed at `dashboard-server` in
+The "Collector service" step (already repointed at `dash-generator` in
 the previous spec) now offers to install `collector` too — as a SEPARATE
 prompt ("Install the collector as a background service now?"), since a
 user might legitimately want one without the other (e.g. a machine that
-only hosts Loki/Grafana/dashboard-server, with collectors running
+only hosts Loki/Grafana/dash-generator, with collectors running
 elsewhere once the shared-collector project exists). Uses the same
-generalized `service.Config`/`Install` already built for dashboard-server —
+generalized `service.Config`/`Install` already built for dash-generator —
 no further service-package changes needed.
 
 ## Testing
@@ -583,7 +583,7 @@ no further service-package changes needed.
 
 - The dashboard template's usage gauges reading `usage-truth`'s
   percentages directly instead of the old token math (flagged in the
-  dashboard-server spec too).
+  dash-generator spec too).
 - The final cutover: deleting `collector-old/` and updating
   `bin/install-service.sh`/README references that still point at it —
   planned as the implementation plan's last task, done only once this
@@ -591,4 +591,4 @@ no further service-package changes needed.
 - The `/usage` history + Grafana reset-boundary visualization requested
   after this spec was first drafted — see "Timestamped /usage history"
   below; the collector side is already covered by the existing
-  `usagetruth` design, the template panel is dashboard-server's side.
+  `usagetruth` design, the template panel is dash-generator's side.

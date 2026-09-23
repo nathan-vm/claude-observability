@@ -3,7 +3,7 @@ on:
   push:
     tags: ['v*']
 jobs:
-  build:
+  setup:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -35,10 +35,81 @@ jobs:
           go build -o "claude-observability-setup-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" ./cmd/setup
       - uses: actions/upload-artifact@v4
         with:
-          name: binaries-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: binaries-setup-${{ matrix.goos }}-${{ matrix.goarch }}
           path: setup/claude-observability-setup-*
+
+  dash-generator:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: build
+        working-directory: dash-generator
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          ext=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
+          go build -o "dash-generator-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" ./cmd/dash-generator
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries-dash-generator-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dash-generator/dash-generator-*
+
+  collector:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: build
+        working-directory: collector
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          ext=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
+          go build -o "collector-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" ./cmd/collector
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries-collector-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: collector/collector-*
+
   release:
-    needs: build
+    needs: [setup, dash-generator, collector]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

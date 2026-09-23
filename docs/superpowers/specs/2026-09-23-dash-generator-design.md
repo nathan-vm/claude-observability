@@ -1,4 +1,4 @@
-# Dashboard Server — Design
+# Dash Generator — Design
 
 Date: 2026-09-23
 Status: approved-pending-review
@@ -23,7 +23,7 @@ Go port) becomes three Go binaries instead:
    3-tier email resolution, session/per-request skill tracking, dedup with
    resume-safety, batched Loki push with specific retry rules). It gets its
    own spec once this one ships.
-3. **dashboard-server** — **this spec**. Ports `rate-meter.mjs` and
+3. **dash-generator** — **this spec**. Ports `rate-meter.mjs` and
    `dashboard-generator.mjs`. Both have zero dependency on transcripts or
    the `claude` CLI — pure Loki-HTTP-in, Loki/file-out — so they can run
    anywhere Loki is reachable: the same local machine in a local setup
@@ -75,13 +75,13 @@ edit, decided alongside the collector spec, not touched by this one.
 
 ## Module layout
 
-New top-level directory `dashboard-server/` (own `go.mod`, own release
+New top-level directory `dash-generator/` (own `go.mod`, own release
 binary), mirroring `setup/`'s structure:
 
 ```
-dashboard-server/
+dash-generator/
   go.mod
-  cmd/dashboard-server/main.go
+  cmd/dash-generator/main.go
   internal/lokiclient/lokiclient.go       (Query, QueryRange, Push)
   internal/lokiclient/lokiclient_test.go  (httptest.Server-backed)
   internal/ratemeter/ratemeter.go         (port of rate-meter.mjs)
@@ -90,7 +90,7 @@ dashboard-server/
   internal/dashboardgen/dashboardgen_test.go
   internal/state/state.go                 (small JSON state: ratePublished)
   internal/state/state_test.go
-.github/workflows/dashboard-server-release.yml
+.github/workflows/dash-generator-release.yml
 ```
 
 ## `internal/lokiclient` — shared HTTP client
@@ -208,11 +208,11 @@ func Load(path string) (*State, error) // missing file -> zero State, no error
 func Save(path string, st *State) error // write-temp-then-rename, same as the JS
 ```
 
-Default path: `<repo root>/.state/dashboard-server-state.json` — a new
+Default path: `<repo root>/.state/dash-generator-state.json` — a new
 file, separate from the JS collector's `.state/collector-state.json` (no
 shared fields, no reason to collide).
 
-## `cmd/dashboard-server/main.go`
+## `cmd/dash-generator/main.go`
 
 Two independent loops, matching `collector.mjs`'s existing cadence split
 (rate publishing is cheap and worth keeping fresh; dashboard regeneration
@@ -249,7 +249,7 @@ Two changes to already-built code:
    `CollectorScript()`) to a generic one any binary can use:
    ```go
    type Config struct {
-       Label      string          // service identifier (e.g. "com.agents-observability.dashboard-server")
+       Label      string          // service identifier (e.g. "com.agents-observability.dash-generator")
        Command    string          // absolute path to the executable to run
        Args       []string
        WorkingDir string
@@ -259,17 +259,17 @@ Two changes to already-built code:
    ```
    `GeneratePlist`/`GenerateUnit`/`GenerateTaskArgs` change to use
    `cfg.Command`/`cfg.Args` instead of the hardcoded node-plus-script
-   shape. This is required regardless of dashboard-server, since the
+   shape. This is required regardless of dash-generator, since the
    future collector binary needs the exact same generic installer.
 
 2. **`cmd/setup/main.go`'s "Collector service" step now installs
-   `dashboard-server` instead of the old Node collector.** It no longer
+   `dash-generator` instead of the old Node collector.** It no longer
    does `exec.LookPath("node")`/`exec.LookPath("claude")` — it looks for
-   the `dashboard-server` binary (built alongside `claude-observability-
+   the `dash-generator` binary (built alongside `claude-observability-
    setup` from the same release, or found via `exec.LookPath` if the user
    put it on PATH) and installs *that* as the background service. The
    prompt text changes from "Install the collector as a background service
-   now?" to "Install the dashboard server as a background service now?"
+   now?" to "Install the dash generator as a background service now?"
    with a one-line note that transcript scanning / usage-truth aren't
    wired up yet (future spec).
 
@@ -297,7 +297,7 @@ Two changes to already-built code:
   stale file getting removed).
 - `state`: load/save round-trip, missing-file-is-zero-value.
 - CI: same `go test ./...` matrix pattern as `setup/`'s workflow, pointed
-  at `dashboard-server/`.
+  at `dash-generator/`.
 
 ## Open items for the future collector spec (not resolved here)
 
@@ -310,5 +310,5 @@ Two changes to already-built code:
 - The dashboard template's usage gauges need to read `usage-truth`'s
   direct percentages instead of `usage-meter`'s token math.
 - Whether the wizard's "Collector service" step should offer *both*
-  dashboard-server and the future collector, or fold them into one
+  dash-generator and the future collector, or fold them into one
   prompt.
