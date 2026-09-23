@@ -3,8 +3,10 @@
 package dashboardgen
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -291,4 +293,258 @@ func mcpServers(lokiURL, exporterStream, email string) []string {
 	}
 	sort.Strings(servers)
 	return servers
+}
+
+func accountVariable(email string) map[string]interface{} {
+	escaped := escapeRegex(email)
+	return map[string]interface{}{
+		"name": "account", "label": "Account", "type": "constant",
+		"query":   escaped,
+		"current": map[string]interface{}{"text": email, "value": escaped},
+		"hide":    float64(2),
+	}
+}
+
+// AllCutlines bundles the three cutline sets scopeAccount needs: the total
+// rate panel's, and the input/output split panel's own.
+type AllCutlines struct {
+	Total, Input, Output Cutlines
+}
+
+// applyCutlines injects the cutlines into every timeseries panel's
+// threshold steps that declare them — the total panel's cutlines live in
+// fieldConfig.defaults, the per-series (input/output) ones live in a
+// fieldConfig.overrides entry keyed by the override's matcher.options.
+func applyCutlines(dashboard map[string]interface{}, byName map[string]Cutlines) {
+	write := func(steps []interface{}, cut Cutlines, has bool) {
+		if steps == nil || !has {
+			return
+		}
+		values := []int64{cut.P75, cut.Outlier, cut.Extreme}
+		for i := 1; i < len(steps) && i <= len(values); i++ {
+			if step, ok := steps[i].(map[string]interface{}); ok {
+				step["value"] = values[i-1]
+			}
+		}
+	}
+	for _, panel := range allPanels(dashboard) {
+		if panel["type"] != "timeseries" {
+			continue
+		}
+		fieldConfig, _ := panel["fieldConfig"].(map[string]interface{})
+		if fieldConfig == nil {
+			continue
+		}
+		if defaults, ok := fieldConfig["defaults"].(map[string]interface{}); ok {
+			if thresholds, ok := defaults["thresholds"].(map[string]interface{}); ok {
+				steps, _ := thresholds["steps"].([]interface{})
+				total, has := byName["total"]
+				write(steps, total, has)
+			}
+		}
+		overrides, _ := fieldConfig["overrides"].([]interface{})
+		for _, o := range overrides {
+			override, ok := o.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			matcher, _ := override["matcher"].(map[string]interface{})
+			series, _ := matcher["options"].(string)
+			properties, _ := override["properties"].([]interface{})
+			for _, p := range properties {
+				prop, ok := p.(map[string]interface{})
+				if !ok || prop["id"] != "thresholds" {
+					continue
+				}
+				value, _ := prop["value"].(map[string]interface{})
+				steps, _ := value["steps"].([]interface{})
+				cut, has := byName[series]
+				write(steps, cut, has)
+			}
+		}
+	}
+}
+
+// AccountLimits are the block_5h/week token-limit references drawn on the
+// gauges. No longer auto-calibrated by anything (usage-meter is gone) —
+// purely user-set in account-limits.json, or the hardcoded default.
+type AccountLimits struct {
+	Block5h, Week int64
+}
+
+func loadLimits(path string) (map[string]interface{}, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string]interface{}{}, nil
+		}
+		return nil, fmt.Errorf("account-limits.json unreadable (%w); fix the file: carrying on without it would revert limits and the ignore list", err)
+	}
+	var doc map[string]interface{}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("account-limits.json unreadable (%w); fix the file: carrying on without it would revert limits and the ignore list", err)
+	}
+	return doc, nil
+}
+
+func limitsFor(doc map[string]interface{}, email string) AccountLimits {
+	result := AccountLimits{Block5h: 1_750_000, Week: 21_500_000}
+	if def, ok := doc["default"].(map[string]interface{}); ok {
+		if v, ok := def["block_5h"].(float64); ok {
+			result.Block5h = int64(v)
+		}
+		if v, ok := def["week"].(float64); ok {
+			result.Week = int64(v)
+		}
+	}
+	if accounts, ok := doc["accounts"].(map[string]interface{}); ok {
+		if acct, ok := accounts[email].(map[string]interface{}); ok {
+			if v, ok := acct["block_5h"].(float64); ok {
+				result.Block5h = int64(v)
+			}
+			if v, ok := acct["week"].(float64); ok {
+				result.Week = int64(v)
+			}
+		}
+	}
+	return result
+}
+
+// scopeAccount deep-clones template and mutates the clone: pins the
+// account, injects cutlines into thresholds AND into the LogQL expressions
+// themselves (the rate panel filters by cutline in-query, not just at
+// display time), sets the limit-reference textboxes, rewrites drill-down
+// links to point at this account's own uid, and replaces the MCP-
+// server/skill-owner filter options with what this account actually used.
+func scopeAccount(template map[string]interface{}, email string, cutlines AllCutlines,
+	servers []string, owners []Option, limits AccountLimits, exporterStream, rateHalfLife string,
+) (map[string]interface{}, error) {
+	data, err := json.Marshal(template)
+	if err != nil {
+		return nil, err
+	}
+	var dashboard map[string]interface{}
+	if err := json.Unmarshal(data, &dashboard); err != nil {
+		return nil, err
+	}
+
+	uid := "cc-" + slug(email)
+	if len(uid) > 40 {
+		uid = uid[:40]
+	}
+	dashboard["uid"] = uid
+	dashboard["title"] = "Claude Code — " + email
+
+	if cutlines.Total.Fallback {
+		dashboard["description"] = fmt.Sprintf(
+			"Account %s. Generated from templates/claude-code.json — do not edit by hand, run generate-account-dashboards.mjs. Rate cutlines: DEFAULT values (not enough history, or Loki unavailable), not computed from this account.",
+			email)
+	} else {
+		dashboard["description"] = fmt.Sprintf(
+			"Account %s. Generated from templates/claude-code.json — do not edit by hand, run generate-account-dashboards.mjs. Rate cutlines, over this account's last 7 days: P75 %s, outlier %s, extreme %s tokens/h.",
+			email, commaFormat(cutlines.Total.P75), commaFormat(cutlines.Total.Outlier), commaFormat(cutlines.Total.Extreme))
+	}
+
+	replaceVariable(dashboard, accountVariable(email))
+	applyCutlines(dashboard, map[string]Cutlines{"total": cutlines.Total, "input": cutlines.Input, "output": cutlines.Output})
+
+	for _, panel := range allPanels(dashboard) {
+		targets, _ := panel["targets"].([]interface{})
+		for _, t := range targets {
+			target, ok := t.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			expr, ok := target["expr"].(string)
+			if !ok || expr == "" {
+				continue
+			}
+			expr = strings.ReplaceAll(expr, "__EXPORTER_STREAM__", exporterStream)
+			expr = strings.ReplaceAll(expr, "__HALFLIFE__", rateHalfLife)
+			expr = strings.ReplaceAll(expr, "__CUT_P75__", strconv.FormatInt(cutlines.Total.P75, 10))
+			expr = strings.ReplaceAll(expr, "__CUT_OUTLIER__", strconv.FormatInt(cutlines.Total.Outlier, 10))
+			expr = strings.ReplaceAll(expr, "__CUT_EXTREME__", strconv.FormatInt(cutlines.Total.Extreme, 10))
+			target["expr"] = expr
+		}
+	}
+
+	for _, nv := range []struct {
+		name  string
+		value int64
+	}{{"limit_tokens_5h", limits.Block5h}, {"limit_tokens_week", limits.Week}} {
+		v := strconv.FormatInt(nv.value, 10)
+		replaceVariable(dashboard, map[string]interface{}{
+			"name": nv.name, "type": "textbox", "hide": float64(2),
+			"query": v, "current": map[string]interface{}{"text": v, "value": v},
+		})
+	}
+
+	for _, panel := range allPanels(dashboard) {
+		var linkLists [][]interface{}
+		fieldConfig, _ := panel["fieldConfig"].(map[string]interface{})
+		if defaults, ok := fieldConfig["defaults"].(map[string]interface{}); ok {
+			if links, ok := defaults["links"].([]interface{}); ok {
+				linkLists = append(linkLists, links)
+			}
+		}
+		if overrides, ok := fieldConfig["overrides"].([]interface{}); ok {
+			for _, o := range overrides {
+				override, ok := o.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				properties, _ := override["properties"].([]interface{})
+				for _, p := range properties {
+					prop, ok := p.(map[string]interface{})
+					if !ok || prop["id"] != "links" {
+						continue
+					}
+					if links, ok := prop["value"].([]interface{}); ok {
+						linkLists = append(linkLists, links)
+					}
+				}
+			}
+		}
+		for _, links := range linkLists {
+			for _, l := range links {
+				link, ok := l.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				url, ok := link["url"].(string)
+				if !ok || !strings.Contains(url, "__DASHBOARD__") {
+					continue
+				}
+				link["url"] = strings.ReplaceAll(url, "__DASHBOARD__", uid)
+			}
+		}
+	}
+
+	filter := func(name, label string, options []Option) map[string]interface{} {
+		all := append([]Option{{Text: "All", Value: ".*"}}, options...)
+		queryParts := make([]string, len(all))
+		optList := make([]interface{}, len(all))
+		for i, o := range all {
+			queryParts[i] = o.Text + " : " + o.Value
+			optList[i] = map[string]interface{}{"text": o.Text, "value": o.Value, "selected": i == 0}
+		}
+		return map[string]interface{}{
+			"name": name, "label": label, "type": "custom",
+			"query":      strings.Join(queryParts, ","),
+			"options":    optList,
+			"current":    map[string]interface{}{"text": all[0].Text, "value": all[0].Value},
+			"includeAll": false, "multi": false, "hide": float64(0),
+		}
+	}
+	serverOptions := make([]Option, len(servers))
+	for i, s := range servers {
+		serverOptions[i] = Option{Text: s, Value: escapeRegex(s)}
+	}
+	replaceVariable(dashboard, filter("server", "MCP server", serverOptions))
+	replaceVariable(dashboard, filter("owner", "Skill owner", owners))
+
+	if err := assertNoPlaceholders(dashboard); err != nil {
+		return nil, err
+	}
+	return dashboard, nil
 }

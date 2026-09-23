@@ -1,0 +1,29 @@
+{
+  "uid": "TEMPLATE",
+  "title": "Claude Code — TEMPLATE",
+  "description": "placeholder",
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "steps": [ {"value": null}, {"value": 0}, {"value": 0}, {"value": 0} ] },
+          "links": [ { "url": "/d/__DASHBOARD__" } ]
+        },
+        "overrides": [
+          {
+            "matcher": { "options": "input" },
+            "properties": [
+              { "id": "thresholds", "value": { "steps": [ {"value": null}, {"value": 0}, {"value": 0} ] } }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        { "refId": "A", "expr": "sum({service_name=\"__EXPORTER_STREAM__\", halflife=\"__HALFLIFE__\"} | rate > __CUT_P75__ and rate < __CUT_OUTLIER__ or rate < __CUT_EXTREME__)" }
+      ]
+    }
+  ]
+}

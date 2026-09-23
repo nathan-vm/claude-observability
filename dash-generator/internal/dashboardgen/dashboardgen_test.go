@@ -1,9 +1,12 @@
 package dashboardgen
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -230,5 +233,108 @@ func TestMcpServers_ReturnsSortedNames(t *testing.T) {
 	servers := mcpServers(srv.URL, "claude-code-exporter-1", "a@example.com")
 	if len(servers) != 2 || servers[0] != "filesystem" || servers[1] != "github" {
 		t.Errorf("servers = %v", servers)
+	}
+}
+
+func loadTestTemplate(t *testing.T) map[string]interface{} {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "template.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var template map[string]interface{}
+	if err := json.Unmarshal(data, &template); err != nil {
+		t.Fatal(err)
+	}
+	return template
+}
+
+func TestScopeAccount_ReplacesAllPlaceholders(t *testing.T) {
+	template := loadTestTemplate(t)
+	cutlines := AllCutlines{
+		Total:  Cutlines{P75: 100, Outlier: 200, Extreme: 300},
+		Input:  Cutlines{P75: 10, Outlier: 20, Extreme: 30},
+		Output: Cutlines{P75: 5, Outlier: 15, Extreme: 25},
+	}
+	limits := AccountLimits{Block5h: 1_750_000, Week: 21_500_000}
+
+	dashboard, err := scopeAccount(template, "a@example.com", cutlines, []string{"github"},
+		[]Option{{Text: "superpowers", Value: "superpowers"}}, limits, "claude-code-exporter-1", "20m")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if dashboard["uid"] != "cc-a-example-com" {
+		t.Errorf("uid = %v", dashboard["uid"])
+	}
+	panels := allPanels(dashboard)
+	target := panels[0]["targets"].([]interface{})[0].(map[string]interface{})
+	expr := target["expr"].(string)
+	for _, placeholder := range []string{"__EXPORTER_STREAM__", "__HALFLIFE__", "__CUT_P75__", "__CUT_OUTLIER__", "__CUT_EXTREME__"} {
+		if strings.Contains(expr, placeholder) {
+			t.Errorf("expr still contains %s: %s", placeholder, expr)
+		}
+	}
+	if !strings.Contains(expr, "claude-code-exporter-1") || !strings.Contains(expr, "20m") {
+		t.Errorf("expr missing substituted values: %s", expr)
+	}
+
+	links := panels[0]["fieldConfig"].(map[string]interface{})["defaults"].(map[string]interface{})["links"].([]interface{})
+	link := links[0].(map[string]interface{})
+	if link["url"] != "/d/cc-a-example-com" {
+		t.Errorf("link url = %v", link["url"])
+	}
+
+	steps := panels[0]["fieldConfig"].(map[string]interface{})["defaults"].(map[string]interface{})["thresholds"].(map[string]interface{})["steps"].([]interface{})
+	if steps[1].(map[string]interface{})["value"] != int64(100) {
+		t.Errorf("total P75 threshold not applied: %v", steps[1])
+	}
+}
+
+func TestScopeAccount_OriginalTemplateUntouched(t *testing.T) {
+	template := loadTestTemplate(t)
+	original, _ := json.Marshal(template)
+
+	cutlines := AllCutlines{Total: Cutlines{P75: 1, Outlier: 2, Extreme: 3}}
+	_, err := scopeAccount(template, "a@example.com", cutlines, nil, nil, AccountLimits{}, "s", "20m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, _ := json.Marshal(template)
+	if string(original) != string(after) {
+		t.Error("scopeAccount mutated the shared template — must deep-clone first")
+	}
+}
+
+func TestLimitsFor_FallsBackThroughDefaultThenAccount(t *testing.T) {
+	doc := map[string]interface{}{
+		"default":  map[string]interface{}{"block_5h": float64(111), "week": float64(222)},
+		"accounts": map[string]interface{}{"a@example.com": map[string]interface{}{"block_5h": float64(999)}},
+	}
+	got := limitsFor(doc, "a@example.com")
+	if got.Block5h != 999 || got.Week != 222 {
+		t.Errorf("got %+v, want block_5h from account, week from default", got)
+	}
+
+	gotOther := limitsFor(doc, "nobody@example.com")
+	if gotOther.Block5h != 111 || gotOther.Week != 222 {
+		t.Errorf("got %+v for unconfigured account, want the default block", gotOther)
+	}
+}
+
+func TestLimitsFor_HardcodedFallbackWhenNoDefaultEither(t *testing.T) {
+	got := limitsFor(map[string]interface{}{}, "a@example.com")
+	if got.Block5h != 1_750_000 || got.Week != 21_500_000 {
+		t.Errorf("got %+v, want hardcoded fallback", got)
+	}
+}
+
+func TestLoadLimits_MissingFileReturnsEmptyDoc(t *testing.T) {
+	doc, err := loadLimits(filepath.Join(t.TempDir(), "nope.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(doc) != 0 {
+		t.Errorf("doc = %v, want empty", doc)
 	}
 }
