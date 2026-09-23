@@ -68,7 +68,8 @@ services:
     restart: unless-stopped
 
 # Everything that used to run here as dashboard-generator and
-# transcript-exporter containers is now collector/collector.mjs, ONE host
+# transcript-exporter containers is now collector-old/collector.mjs (being
+# ported to Go as collector/ — see docs/superpowers/specs/), ONE host
 # process (not a container) run as a launchd service — see
 # bin/install-service.sh and README.md's "The collector service".
 #

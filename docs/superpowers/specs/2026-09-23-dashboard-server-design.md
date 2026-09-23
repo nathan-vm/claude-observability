@@ -7,8 +7,9 @@ Status: approved-pending-review
 
 Mid-implementation of the local setup wizard, it became clear the intended
 end state is **no Node.js dependency anywhere** — not just in the setup
-wizard (already Go), but in the collector too. The collector as it exists
-today (`collector/*.mjs`, six files) becomes three Go binaries instead:
+wizard (already Go), but in the collector too. The Node collector (now
+renamed to `collector-old/*.mjs`, six files, freeing `collector/` for the
+Go port) becomes three Go binaries instead:
 
 1. **wizard** — already built (`setup/`). Configures Claude Code telemetry,
    installs background services.

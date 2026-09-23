@@ -56,16 +56,15 @@ and publish, no calibration.
 
 ## Module layout
 
-New top-level directory `collector-go/` during development (own `go.mod`,
-own release binary) — kept separate from the existing `collector/`
-(still the live Node implementation) to avoid a naming collision while
-both exist side by side. The cutover task (last task in the
-implementation plan) deletes `collector/*.mjs` and `git mv`s
-`collector-go/` to `collector/` once this binary is verified working
-end-to-end against a real account.
+The existing Node implementation has been renamed to `collector-old/`
+(already done, ahead of this plan) — `collector/` is free, so the Go
+module is built directly there rather than through a temporary name and a
+later cutover rename. `collector-old/` stays until this binary is
+verified working end-to-end against a real account, then gets deleted as
+the implementation plan's last task.
 
 ```
-collector-go/
+collector/
   go.mod
   cmd/collector/main.go
   internal/accounts/accounts.go            (port of accounts.mjs)
@@ -85,7 +84,7 @@ collector-go/
 
 `lokiclient` is intentionally duplicated from `dashboard-server/internal/
 lokiclient` rather than shared via a third module — same reasoning as
-keeping `collector-go` and `dashboard-server` separate modules in the
+keeping `collector` and `dashboard-server` separate modules in the
 first place: these are independently deployed binaries, and a shared
 internal module between them is coupling neither needs. It's ~40 lines;
 duplication is cheaper than the coordination cost of a shared module.
@@ -458,6 +457,50 @@ Dropped entirely (data source gone with `usage-meter`): `offsetHoursFor`,
 `parseResetWeekday`, `meterTokens`, `loadLimits`/`writeLimits`, the whole
 `account-limits.json` calibration write-back.
 
+## Timestamped `/usage` history + reset-boundary visualization
+
+Two related requirements added after this spec's first draft: (1) be able
+to check "what % was I at yesterday" in the dashboard, and (2) when
+panning a time range that straddles a reset (e.g. viewing 3pm-6pm and the
+account's week reset at 5pm), see the OLD window's real values before 5pm
+and the NEW window's real values from 5pm on — not one value smeared
+across the whole range.
+
+Both fall out of the design already above, with no new collector logic
+needed — worth stating explicitly since it wasn't called out as a
+deliberate property before:
+
+- `PublishUsageTruth` runs once per `cmd/collector/main.go`'s
+  `POLL_SECONDS` loop (default 60s) for as long as the collector runs —
+  not once at startup. Every run pushes a NEW Loki line (own timestamp,
+  Loki's native push semantics), it never overwrites a previous one.
+- Because each line carries the real percentage AND its real "resets at"
+  text as it stood at that exact poll, the raw history in
+  `claude-code-usage-truth` already IS a correct time series: a query
+  over 3pm-6pm returns whatever `session_pct`/`week_pct` values were
+  actually true at each polled moment in that range — naturally low/
+  rising before a 5pm reset, then dropping to whatever the new window's
+  real value is from the first poll after 5pm on. There's no "current
+  value smeared backward" to correct, because nothing ever computes a
+  single current value and stamps it across a range — it's raw samples,
+  each with the timestamp it was true at.
+- What this DOES require, tracked as a dashboard-server/template
+  follow-up rather than a collector change: a time-series panel in
+  `grafana/templates/claude-code.json` that plots `session_pct`/
+  `week_pct` from `{service_name="claude-code-usage-truth"} | user_email
+  =~ ...} | unwrap week_pct` (etc.) over the selected range, instead of
+  (or alongside) an instant-value gauge. That's pure Grafana/LogQL
+  panel-JSON work — no Go code in either `collector` or `dashboard-server`
+  needs to change for it, so it can be added to the dashboard-server
+  implementation plan as a template-only task once that plan is written.
+- One accuracy caveat worth setting expectations on: the reset boundary
+  in the graph will be accurate to within one `POLL_SECONDS` interval
+  (60s default) of the real reset moment, not to the second — the data
+  point immediately after the actual reset is whenever the next poll
+  happens to land. Polling more often narrows this at the cost of more
+  `claude -p /usage` invocations (a real cost since each spawns the CLI,
+  unlike the free-to-poll-often Loki-only work in `dashboard-server`).
+
 ## `cmd/collector/main.go`
 
 One loop (unlike dashboard-server's two — there's no dashboard cadence
@@ -541,7 +584,11 @@ no further service-package changes needed.
 - The dashboard template's usage gauges reading `usage-truth`'s
   percentages directly instead of the old token math (flagged in the
   dashboard-server spec too).
-- The final cutover: deleting `collector/*.mjs`, `git mv
-  collector-go collector`, updating `bin/install-service.sh` references
-  and README — planned as the implementation plan's last task, done only
-  once this binary is verified against a real account's real transcripts.
+- The final cutover: deleting `collector-old/` and updating
+  `bin/install-service.sh`/README references that still point at it —
+  planned as the implementation plan's last task, done only once this
+  binary is verified against a real account's real transcripts.
+- The `/usage` history + Grafana reset-boundary visualization requested
+  after this spec was first drafted — see "Timestamped /usage history"
+  below; the collector side is already covered by the existing
+  `usagetruth` design, the template panel is dashboard-server's side.

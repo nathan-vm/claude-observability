@@ -35,7 +35,7 @@ while [ -h "$SOURCE" ]; do
 done
 BIN_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 OBS_ROOT="$(cd "$BIN_DIR/.." && pwd)"
-COLLECTOR="$OBS_ROOT/collector/collector.mjs"
+COLLECTOR="$OBS_ROOT/collector-old/collector.mjs"
 LABEL="com.agents-observability.collector"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOG_DIR="$OBS_ROOT/.state"
