@@ -637,3 +637,169 @@ func TestPushToLoki_EmptyRecordsIsNoop(t *testing.T) {
 		t.Errorf("pushed=%v skipped=%v err=%v", pushed, skipped, err)
 	}
 }
+
+func TestSeedSeenFromLoki_PopulatesFromToolUseIDLabels(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"status":"success","data":{"resultType":"streams","result":[
+			{"stream":{"tool_use_id":"tu1"},"values":[["1700000000000000000","x"]]}
+		]}}`))
+	}))
+	defer srv.Close()
+
+	seen := map[string]int64{}
+	SeedSeenFromLoki(srv.URL, "claude-code-exporter-1", 1, seen, t.Logf)
+	if seen["tu1"] == 0 {
+		t.Errorf("seen = %v, want tu1 populated", seen)
+	}
+}
+
+func TestSeedSeenFromLoki_ContinuesPastAFailedDay(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		if n == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Write([]byte(`{"status":"success","data":{"resultType":"streams","result":[
+			{"stream":{"tool_use_id":"tu2"},"values":[["1700000000000000000","x"]]}
+		]}}`))
+	}))
+	defer srv.Close()
+
+	seen := map[string]int64{}
+	SeedSeenFromLoki(srv.URL, "s", 2, seen, t.Logf)
+	if seen["tu2"] == 0 {
+		t.Error("a failed day must not stop the remaining days from seeding")
+	}
+}
+
+func TestRunPass_EndToEndSettlesAndPushes(t *testing.T) {
+	root := t.TempDir()
+	projectsDir := filepath.Join(root, "projects")
+	must(t, os.MkdirAll(projectsDir, 0o755))
+	writeJSONL(t, filepath.Join(projectsDir, "s.jsonl"), []string{
+		`{"type":"assistant","sessionId":"s1","requestId":"r1","timestamp":"2026-01-01T00:00:00Z","message":{"model":"claude","content":[{"type":"tool_use","id":"tu1","name":"Read"}]}}`,
+		`{"type":"assistant","sessionId":"s1","requestId":"r2","timestamp":"2026-01-01T00:01:00Z","message":{"model":"claude","usage":{"input_tokens":50},"content":[]}}`,
+	})
+
+	var pushed bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/loki/api/v1/push" {
+			pushed = true
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.Write([]byte(`{"status":"success","data":{"resultType":"streams","result":[]}}`))
+	}))
+	defer srv.Close()
+
+	statePath := filepath.Join(root, "state.json")
+	cfg := Config{
+		ConfigDirs: []string{projectsDir}, LokiURL: srv.URL, ExporterStream: "claude-code-exporter-1",
+		BatchSize: 2000, OrphanAfterMs: 15 * 60 * 1000, DedupDays: 90, EmailLookbackHours: 720,
+		StatePath: statePath, Log: t.Logf,
+	}
+	st, err := state.Load(statePath)
+	must(t, err)
+
+	n, err := RunPass(cfg, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("pushed count = %d, want 1", n)
+	}
+	if !pushed {
+		t.Error("Loki push endpoint was never called")
+	}
+	if len(st.Files) != 1 {
+		t.Errorf("state.Files = %v, want the transcript's offset recorded", st.Files)
+	}
+}
+
+func TestRunPass_OrphanGroupSettlesWithZeroTokensAfterTimeout(t *testing.T) {
+	root := t.TempDir()
+	projectsDir := filepath.Join(root, "projects")
+	must(t, os.MkdirAll(projectsDir, 0o755))
+	oldTimestamp := time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339)
+	writeJSONL(t, filepath.Join(projectsDir, "s.jsonl"), []string{
+		fmt.Sprintf(`{"type":"assistant","sessionId":"s1","requestId":"r1","timestamp":%q,"message":{"model":"claude","content":[{"type":"tool_use","id":"tu1","name":"Read"}]}}`, oldTimestamp),
+	})
+
+	var pushedTokens string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/loki/api/v1/push" {
+			var body map[string]interface{}
+			json.NewDecoder(r.Body).Decode(&body)
+			streams := body["streams"].([]interface{})
+			s0 := streams[0].(map[string]interface{})
+			values := s0["values"].([]interface{})
+			v0 := values[0].([]interface{})
+			meta := v0[2].(map[string]interface{})
+			pushedTokens = meta["tokens_attributed"].(string)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.Write([]byte(`{"status":"success","data":{"resultType":"streams","result":[]}}`))
+	}))
+	defer srv.Close()
+
+	cfg := Config{
+		ConfigDirs: []string{projectsDir}, LokiURL: srv.URL, ExporterStream: "s",
+		BatchSize: 2000, OrphanAfterMs: 1000, DedupDays: 90, EmailLookbackHours: 720, // 1s orphan timeout, easily tripped by the 1h-old fixture
+		StatePath: filepath.Join(root, "state.json"), Log: t.Logf,
+	}
+	st, err := state.Load(cfg.StatePath)
+	must(t, err)
+	if _, err := RunPass(cfg, st); err != nil {
+		t.Fatal(err)
+	}
+	if pushedTokens != "0" {
+		t.Errorf("orphaned group's tokens_attributed = %q, want \"0\"", pushedTokens)
+	}
+}
+
+func TestInitState_RescanZeroesFilesButKeepsDedup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	seeded := &state.State{
+		Version: 2,
+		Files:   map[string]*state.FileState{"/old.jsonl": {Offset: 999}},
+		Seen:    map[string]int64{"tu1": 1},
+	}
+	must(t, state.Save(path, seeded))
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"status":"success","data":{"resultType":"streams","result":[]}}`))
+	}))
+	defer srv.Close()
+
+	st, err := InitState(Config{StatePath: path, LokiURL: srv.URL, ExporterStream: "s", DedupDays: 90, Rescan: true, Log: t.Logf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Files) != 0 {
+		t.Errorf("Files = %v, want zeroed by --rescan", st.Files)
+	}
+	if st.Seen["tu1"] != 1 {
+		t.Error("--rescan must keep the dedup map")
+	}
+}
+
+func TestInitState_SeedsWhenSeenIsEmpty(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	var seedQueried bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seedQueried = true
+		w.Write([]byte(`{"status":"success","data":{"resultType":"streams","result":[]}}`))
+	}))
+	defer srv.Close()
+
+	_, err := InitState(Config{StatePath: path, LokiURL: srv.URL, ExporterStream: "s", DedupDays: 1, Log: t.Logf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !seedQueried {
+		t.Error("a fresh state (empty Seen) must trigger seedSeenFromLoki")
+	}
+}

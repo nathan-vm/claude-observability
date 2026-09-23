@@ -779,3 +779,258 @@ func truncateStr(s string, n int) string {
 	}
 	return s[:n]
 }
+
+// Config bundles everything RunPass/InitState need. ConfigDirs must
+// already have "/projects" appended by the caller.
+type Config struct {
+	ConfigDirs         []string
+	LokiURL            string
+	ExporterStream     string
+	BatchSize          int
+	OrphanAfterMs      int64
+	DedupDays          int
+	EmailLookbackHours int
+	DryRun             bool
+	Rescan             bool
+	StatePath          string
+	Log                func(string, ...any)
+}
+
+func (cfg Config) defaultLabels() map[string]string {
+	return map[string]string{"service_name": cfg.ExporterStream, "kind": "tools"}
+}
+
+// SeedSeenFromLoki rebuilds seen from what's already in Loki — runs when
+// the map is empty (an upgrade, a lost state volume, or a deleted file).
+// Scanned one day at a time to stay under Loki's per-query line limit,
+// continuing past a single failed day rather than aborting the whole seed.
+func SeedSeenFromLoki(lokiURL, exporterStream string, dedupDays int, seen map[string]int64, log func(string, ...any)) {
+	const step = 24 * 3600 * 1_000_000_000 // 1 day, ns
+	total := 0
+	windowTotalNs := int64(dedupDays) * 24 * 3600 * 1_000_000_000
+	nowNs := time.Now().UnixNano()
+	query := fmt.Sprintf(`{service_name="%s"}`, exporterStream)
+	for offset := int64(0); offset < windowTotalNs; offset += step {
+		end := nowNs - offset
+		start := end - step
+		results, err := lokiclient.QueryRange(lokiURL, query, start, end, 5000, "backward")
+		if err != nil {
+			log("seed window failed (%v); continuing to the next", err)
+			continue
+		}
+		for _, r := range results {
+			id := r.Labels["tool_use_id"]
+			if id == "" {
+				continue
+			}
+			for _, v := range r.Values {
+				ns, _ := strconv.ParseInt(v[0], 10, 64)
+				seen[id] = ns / 1e6
+				total++
+			}
+		}
+	}
+	if total > 0 {
+		log("dedup seeded with %d call(s) already in Loki", len(seen))
+	}
+}
+
+// InitState loads state (or starts fresh), honors --rescan (zeros
+// state.Files only — keeps the dedup/plugin-skill maps, a non-destructive
+// re-read), and seeds state.Seen from Loki when it's empty.
+func InitState(cfg Config) (*state.State, error) {
+	cfg.Log("transcripts: %s", strings.Join(cfg.ConfigDirs, ", "))
+	if cfg.DryRun {
+		cfg.Log("loki: %s  (dry-run)", cfg.LokiURL)
+	} else {
+		cfg.Log("loki: %s", cfg.LokiURL)
+	}
+	st, err := state.Load(cfg.StatePath)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Rescan {
+		cfg.Log("RESCAN: zeroing offsets, keeping the dedup map")
+		st.Files = map[string]*state.FileState{}
+	}
+	if len(st.Files) == 0 {
+		cfg.Log("first run: importing the full transcript history")
+	}
+	if len(st.Seen) == 0 {
+		SeedSeenFromLoki(cfg.LokiURL, cfg.ExporterStream, cfg.DedupDays, st.Seen, cfg.Log)
+	}
+	return st, nil
+}
+
+// RunPass does one full pass: scan every configured directory's new
+// transcript lines, settle/orphan groups, rebuild skill records from
+// OTel, dedup, resolve emails, push to Loki, persist state. Returns the
+// count of records actually pushed.
+func RunPass(cfg Config, st *state.State) (int, error) {
+	firstPass := len(st.Files) == 0
+	files, err := FindTranscripts(cfg.ConfigDirs, cfg.Log)
+	if err != nil {
+		return 0, err
+	}
+
+	type update struct {
+		fs state.FileState
+	}
+	updates := map[string]update{}
+
+	pluginSkills := map[string]map[string]bool{}
+	for sessionID, names := range st.PluginSkills {
+		set := map[string]bool{}
+		for _, n := range names {
+			set[n] = true
+		}
+		pluginSkills[sessionID] = set
+	}
+	pluginSkillByRequest := map[string]state.PluginSkillRequest{}
+	cutoffMs := time.Now().AddDate(0, 0, -cfg.DedupDays).UnixMilli()
+	for reqID, info := range st.PluginSkillByRequest {
+		if info.TsMs >= cutoffMs {
+			pluginSkillByRequest[reqID] = info
+		}
+	}
+
+	var collected []Record
+	for _, path := range files {
+		fs := state.FileState{}
+		if existing, ok := st.Files[path]; ok && existing != nil {
+			fs = *existing
+		}
+		records, newFs, err := ProcessTranscript(path, fs, pluginSkills, pluginSkillByRequest)
+		if err != nil {
+			cfg.Log("failed reading %s: %v", filepath.Base(path), err)
+			continue
+		}
+
+		for _, track := range []string{"main", "sub"} {
+			var group **state.Group
+			if track == "main" {
+				group = &newFs.PendingMain
+			} else {
+				group = &newFs.PendingSub
+			}
+			if *group != nil && time.Now().UnixMilli()-(*group).AtMs > cfg.OrphanAfterMs {
+				records = append(records, Settle(**group, 0)...)
+				*group = nil
+			}
+		}
+
+		collected = append(collected, records...)
+		updates[path] = update{fs: newFs}
+	}
+
+	skillRecords, err := RebuildSkillRecords(cfg.LokiURL, cfg.ExporterStream, cfg.DedupDays, pluginSkills, pluginSkillByRequest, firstPass, cfg.Log)
+	if err != nil {
+		return 0, err
+	}
+	collected = append(collected, skillRecords...)
+
+	fresh, novos := DropAlreadySeen(st.Seen, cfg.DedupDays, collected)
+	if skipped := len(collected) - len(fresh); skipped > 0 {
+		cfg.Log("%d call(s) skipped: already exported (resumed session)", skipped)
+	}
+
+	commit := func() {
+		for path, u := range updates {
+			fs := u.fs
+			st.Files[path] = &fs
+		}
+		for id, ts := range novos {
+			st.Seen[id] = ts
+		}
+		for sessionID, set := range pluginSkills {
+			names := make([]string, 0, len(set))
+			for n := range set {
+				names = append(names, n)
+			}
+			st.PluginSkills[sessionID] = names
+		}
+		st.PluginSkillByRequest = pluginSkillByRequest
+	}
+
+	if len(fresh) == 0 {
+		if len(collected) > 0 {
+			commit()
+			if !cfg.DryRun {
+				if err := state.Save(cfg.StatePath, st); err != nil {
+					return 0, err
+				}
+			}
+		}
+		return 0, nil
+	}
+	collected = fresh
+
+	sessionIDs := map[string]bool{}
+	for _, r := range collected {
+		if id := r.Meta["session_id"]; id != "" {
+			sessionIDs[id] = true
+		}
+	}
+	ids := make([]string, 0, len(sessionIDs))
+	for id := range sessionIDs {
+		ids = append(ids, id)
+	}
+	ResolveEmails(cfg.LokiURL, cfg.EmailLookbackHours, st.SessionEmail, ids, cfg.Log)
+	for i := range collected {
+		if collected[i].Meta["user_email"] != "" {
+			continue
+		}
+		email := st.SessionEmail[collected[i].Meta["session_id"]]
+		collected[i].Meta["user_email"] = email
+		if email != "" {
+			collected[i].Meta["account_source"] = "otel"
+		} else {
+			collected[i].Meta["account_source"] = ""
+		}
+	}
+
+	needsProject := false
+	for _, r := range collected {
+		if r.Meta["user_email"] == "" {
+			needsProject = true
+			break
+		}
+	}
+	if needsProject {
+		owners, err := ProjectOwners(cfg.LokiURL, cfg.ExporterStream, cfg.DedupDays, collected)
+		if err != nil {
+			return 0, err
+		}
+		for i := range collected {
+			if collected[i].Meta["user_email"] != "" {
+				continue
+			}
+			if owner, ok := owners[collected[i].Meta["project"]]; ok {
+				collected[i].Meta["user_email"] = owner
+				collected[i].Meta["account_source"] = "project"
+			}
+		}
+	}
+
+	if cfg.DryRun {
+		commit()
+		return 0, nil
+	}
+
+	pushedRecords, rejected, err := PushToLoki(cfg.LokiURL, cfg.BatchSize, cfg.defaultLabels(), collected, cfg.Log)
+	if err != nil {
+		return 0, err
+	}
+	for _, r := range rejected {
+		id := r.DedupKey
+		if id == "" {
+			id = r.Meta["tool_use_id"]
+		}
+		delete(novos, id)
+	}
+	commit()
+	if err := state.Save(cfg.StatePath, st); err != nil {
+		return 0, err
+	}
+	return len(pushedRecords), nil
+}
