@@ -1355,28 +1355,41 @@ func TestProcessTranscript_ResumesFromOffsetAcrossTwoPasses(t *testing.T) {
 	line1 := `{"type":"assistant","sessionId":"s1","requestId":"r1","timestamp":"2026-01-01T00:00:00Z","message":{"model":"claude","usage":{"input_tokens":10},"content":[]}}`
 	writeJSONL(t, path, []string{line1})
 
+	// A line's bytes are only folded into the consumed offset once the
+	// NEXT line proves it ended in "\n" — with only one line in the file,
+	// pass 1 must NOT advance the offset yet, even though this line does
+	// have a real trailing newline (the algorithm can't tell the
+	// difference without a following line; see ProcessTranscript's doc
+	// comment).
 	_, fs1, err := ProcessTranscript(path, state.FileState{}, map[string]map[string]bool{}, map[string]state.PluginSkillRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fs1.Offset != int64(len(line1)+1) {
-		t.Fatalf("offset after pass 1 = %d, want %d", fs1.Offset, len(line1)+1)
+	if fs1.Offset != 0 {
+		t.Fatalf("offset after pass 1 = %d, want 0 (line 1's bytes aren't proven consumed yet)", fs1.Offset)
 	}
 
-	// Append a second line and re-scan from the saved offset — must not
-	// re-read line1.
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
 	must(t, err)
 	line2 := `{"type":"assistant","sessionId":"s1","requestId":"r2","timestamp":"2026-01-01T00:01:00Z","message":{"model":"claude","content":[{"type":"tool_use","id":"tu2","name":"Read"}]}}`
 	f.WriteString(line2 + "\n")
 	f.Close()
 
+	// Pass 2 re-reads from offset 0 (line 1 is re-parsed — harmless here,
+	// it had no tool_use and nothing was pending to settle), and NOW
+	// line 1's bytes fold into the offset once line 2 is seen after it.
+	// Line 2 itself is the new last line, so ITS bytes stay pending in
+	// turn — the same held-back-last-line rule applying again, one line
+	// later.
 	records2, fs2, err := ProcessTranscript(path, fs1, map[string]map[string]bool{}, map[string]state.PluginSkillRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(records2) != 0 {
 		t.Fatalf("got %d records on pass 2, want 0 (tu2 not yet settled)", len(records2))
+	}
+	if fs2.Offset != int64(len(line1)+1) {
+		t.Errorf("offset after pass 2 = %d, want %d (line 1 now proven consumed)", fs2.Offset, len(line1)+1)
 	}
 	if fs2.PendingMain == nil || fs2.PendingMain.RequestID != "r2" {
 		t.Fatalf("pending after pass 2 = %+v", fs2.PendingMain)
@@ -1389,12 +1402,17 @@ func TestProcessTranscript_ShrunkFileResetsEverything(t *testing.T) {
 	info, _ := os.Stat(path)
 	bigOffset := info.Size() + 1000
 
+	// After the shrink reset, the file gets properly re-scanned from
+	// offset 0 — its one real line DOES have an unsettled tool_use, so a
+	// fresh pending group is legitimately (re)built. What must be true is
+	// that it's the REAL group (session "s1"), not the stale leftover
+	// ("stale") the caller passed in.
 	_, fs, err := ProcessTranscript(path, state.FileState{Offset: bigOffset, PendingMain: &state.Group{SessionID: "stale"}}, map[string]map[string]bool{}, map[string]state.PluginSkillRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fs.PendingMain != nil {
-		t.Error("shrunk file must clear the stale pending group")
+	if fs.PendingMain == nil || fs.PendingMain.SessionID != "s1" {
+		t.Errorf("pending after shrink+rescan = %+v, want a fresh group from session s1, not the stale one", fs.PendingMain)
 	}
 }
 ```
