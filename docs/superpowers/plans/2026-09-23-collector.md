@@ -3377,13 +3377,21 @@ func TestPublishUsageTruth_PublishesOneLinePerLoggedInAccount(t *testing.T) {
 		t.Skip("fake-claude fixture is a POSIX shell script")
 	}
 	dir := t.TempDir()
-	script := `#!/bin/sh
-if [ "$1" = "auth" ]; then
-  echo '{"loggedIn":true,"email":"a@example.com"}'
-else
-  echo '{"is_error":false,"result":"Current session: 5% used\nCurrent week (all models): 6% used"}'
-fi
-`
+	// Built via json.Marshal + a quoted heredoc, not an echo with an
+	// embedded \n: macOS's /bin/sh echo interprets \n as a real newline
+	// byte, which then sits UNESCAPED inside the JSON string and makes it
+	// invalid JSON. A heredoc prints its body verbatim, so json.Marshal's
+	// own correct "\n" (backslash-n) escaping survives untouched.
+	usagePayload, _ := json.Marshal(map[string]interface{}{
+		"is_error": false,
+		"result":   "Current session: 5% used\nCurrent week (all models): 6% used",
+	})
+	script := "#!/bin/sh\n" +
+		`if [ "$1" = "auth" ]; then` + "\n" +
+		`  echo '{"loggedIn":true,"email":"a@example.com"}'` + "\n" +
+		"else\n" +
+		"  cat <<'EOF'\n" + string(usagePayload) + "\nEOF\n" +
+		"fi\n"
 	os.WriteFile(filepath.Join(dir, "claude"), []byte(script), 0o755)
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
