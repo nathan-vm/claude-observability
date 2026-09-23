@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -547,4 +548,120 @@ func scopeAccount(template map[string]interface{}, email string, cutlines AllCut
 		return nil, err
 	}
 	return dashboard, nil
+}
+
+// Config configures one GenerateDashboards pass.
+type Config struct {
+	LokiURL        string
+	ExporterStream string
+	RateHalfLife   string
+	GrafanaDir     string // .../grafana — templates/, account-limits.json, dashboards/accounts/
+}
+
+// GenerateDashboards discovers every account with data, skips ones on the
+// ignore list, computes cutlines/servers/owners per account, scopes the
+// template, and writes/removes files under GrafanaDir/dashboards/accounts/
+// so the directory exactly matches accounts that currently have data.
+func GenerateDashboards(cfg Config, log func(string, ...any)) error {
+	templatePath := filepath.Join(cfg.GrafanaDir, "templates", "claude-code.json")
+	limitsPath := filepath.Join(cfg.GrafanaDir, "account-limits.json")
+	outDir := filepath.Join(cfg.GrafanaDir, "dashboards", "accounts")
+
+	templateData, err := os.ReadFile(templatePath)
+	if err != nil {
+		return err
+	}
+	var template map[string]interface{}
+	if err := json.Unmarshal(templateData, &template); err != nil {
+		return err
+	}
+
+	limits, err := loadLimits(limitsPath)
+	if err != nil {
+		return err
+	}
+	ignoreList, _ := limits["ignore"].([]interface{})
+	ignore := map[string]bool{}
+	for _, e := range ignoreList {
+		if s, ok := e.(string); ok {
+			ignore[s] = true
+		}
+	}
+
+	allEmails, err := discoverAccounts(cfg.LokiURL)
+	if err != nil {
+		return err
+	}
+	var emails []string
+	for _, e := range allEmails {
+		if ignore[e] {
+			log("ignored: %s ('ignore' list in account-limits.json)", e)
+			continue
+		}
+		emails = append(emails, e)
+	}
+
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return err
+	}
+
+	wanted := map[string]map[string]interface{}{}
+	for _, email := range emails {
+		total := rateCutlines(cfg.LokiURL, cfg.ExporterStream, cfg.RateHalfLife, email, "rate")
+		input := rateCutlines(cfg.LokiURL, cfg.ExporterStream, cfg.RateHalfLife, email, "rate_input")
+		output := rateCutlines(cfg.LokiURL, cfg.ExporterStream, cfg.RateHalfLife, email, "rate_output")
+		servers := mcpServers(cfg.LokiURL, cfg.ExporterStream, email)
+		owners := skillOwners(cfg.LokiURL, cfg.ExporterStream, email)
+		accountLimits := limitsFor(limits, email)
+
+		dashboard, err := scopeAccount(template, email, AllCutlines{total, input, output}, servers, owners,
+			accountLimits, cfg.ExporterStream, cfg.RateHalfLife)
+		if err != nil {
+			return err
+		}
+		wanted[slug(email)+".json"] = dashboard
+
+		log("%s  ->  total cutlines P75 %s / outlier %s tokens/h / extreme %s, %d MCP server(s), %d skill owner(s), limits %s/5h and %s/week",
+			email, commaFormat(total.P75), commaFormat(total.Outlier), commaFormat(total.Extreme),
+			len(servers), len(owners), commaFormat(accountLimits.Block5h), commaFormat(accountLimits.Week))
+	}
+
+	existing, _ := os.ReadDir(outDir)
+	for _, e := range existing {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		if _, ok := wanted[name]; !ok {
+			os.Remove(filepath.Join(outDir, name))
+			log("removed: %s (account has no data)", name)
+		}
+	}
+
+	for file, dashboard := range wanted {
+		out, err := json.MarshalIndent(dashboard, "", "  ")
+		if err != nil {
+			return err
+		}
+		out = append(out, '\n')
+		target := filepath.Join(outDir, file)
+		tmp := fmt.Sprintf("%s.tmp-%d", target, os.Getpid())
+		if err := os.WriteFile(tmp, out, 0o644); err != nil {
+			return err
+		}
+		if err := os.Rename(tmp, target); err != nil {
+			return err
+		}
+		log("  %v  ->  %s", dashboard["uid"], file)
+	}
+
+	log("%d dashboard(s), one per account, in %s", len(wanted), outDir)
+	if len(emails) == 0 {
+		if len(allEmails) > 0 {
+			log("No dashboard generated: all %d account(s) with data are on the 'ignore' list.", len(allEmails))
+		} else {
+			log("No account yet — run a Claude session and try again.")
+		}
+	}
+	return nil
 }

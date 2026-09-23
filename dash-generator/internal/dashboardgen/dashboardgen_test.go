@@ -338,3 +338,81 @@ func TestLoadLimits_MissingFileReturnsEmptyDoc(t *testing.T) {
 		t.Errorf("doc = %v, want empty", doc)
 	}
 }
+
+func TestGenerateDashboards_WritesOneFilePerAccountAndRemovesStale(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query().Get("query")
+		switch {
+		case strings.Contains(query, "user_email") && !strings.Contains(query, "claude-code-rate"):
+			w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[
+				{"metric":{"user_email":"a@example.com"}}
+			]}}`))
+		default:
+			w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[]}}`))
+		}
+	}))
+	defer srv.Close()
+
+	grafanaDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(grafanaDir, "templates"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	template, err := os.ReadFile(filepath.Join("testdata", "template.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(grafanaDir, "templates", "claude-code.json"), template, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(grafanaDir, "dashboards", "accounts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(grafanaDir, "dashboards", "accounts", "stale-example-com.json")
+	if err := os.WriteFile(stale, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err = GenerateDashboards(Config{
+		LokiURL: srv.URL, ExporterStream: "claude-code-exporter-1", RateHalfLife: "20m", GrafanaDir: grafanaDir,
+	}, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Error("stale dashboard was not removed")
+	}
+	generated := filepath.Join(grafanaDir, "dashboards", "accounts", "a-example-com.json")
+	if _, err := os.Stat(generated); err != nil {
+		t.Errorf("expected dashboard not written: %v", err)
+	}
+}
+
+func TestGenerateDashboards_SkipsIgnoredAccounts(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query().Get("query")
+		if strings.Contains(query, "user_email") && !strings.Contains(query, "claude-code-rate") {
+			w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[
+				{"metric":{"user_email":"ignored@example.com"}}
+			]}}`))
+			return
+		}
+		w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[]}}`))
+	}))
+	defer srv.Close()
+
+	grafanaDir := t.TempDir()
+	os.MkdirAll(filepath.Join(grafanaDir, "templates"), 0o755)
+	template, _ := os.ReadFile(filepath.Join("testdata", "template.json"))
+	os.WriteFile(filepath.Join(grafanaDir, "templates", "claude-code.json"), template, 0o644)
+	os.WriteFile(filepath.Join(grafanaDir, "account-limits.json"), []byte(`{"ignore":["ignored@example.com"]}`), 0o644)
+
+	if err := GenerateDashboards(Config{LokiURL: srv.URL, ExporterStream: "s", RateHalfLife: "20m", GrafanaDir: grafanaDir}, t.Logf); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, _ := os.ReadDir(filepath.Join(grafanaDir, "dashboards", "accounts"))
+	if len(entries) != 0 {
+		t.Errorf("got %d dashboards, want 0 (account is ignored)", len(entries))
+	}
+}
