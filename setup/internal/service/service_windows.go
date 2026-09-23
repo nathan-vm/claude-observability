@@ -8,24 +8,21 @@ import (
 	"os/exec"
 )
 
-const taskName = "ClaudeObservabilityCollector"
-
 // GenerateTaskArgs returns the `schtasks /create` argument list that
-// registers the collector to run at logon. Env vars are passed as part of
-// the command line (`set NAME=VALUE&& ...`) since schtasks has no native
-// per-task environment block. Paths are wrapped in plain double quotes, not
-// Go's %q (which would escape the backslashes in a Windows path and break
-// cmd.exe's own quoting).
+// registers cfg to run at logon.
 func GenerateTaskArgs(cfg Config) []string {
 	cmd := ""
 	for _, v := range cfg.Env {
 		cmd += fmt.Sprintf("set %s=%s&& ", v.Name, v.Value)
 	}
-	cmd += fmt.Sprintf(`"%s" "%s"`, cfg.NodeBin, cfg.CollectorScript())
+	cmd += fmt.Sprintf(`"%s"`, cfg.Command)
+	for _, a := range cfg.Args {
+		cmd += fmt.Sprintf(` "%s"`, a)
+	}
 
 	return []string{
 		"/create", "/f",
-		"/tn", taskName,
+		"/tn", cfg.Label,
 		"/sc", "onlogon",
 		"/tr", "cmd /c " + cmd,
 	}

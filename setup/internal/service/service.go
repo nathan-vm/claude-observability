@@ -1,26 +1,19 @@
-// Package service installs the collector (collector/collector.mjs) as a
-// background process: a launchd LaunchAgent on macOS, a systemd --user unit
-// on Linux, and a logon-triggered Scheduled Task on Windows.
+// Package service installs an executable as a background process: a
+// launchd LaunchAgent on macOS, a systemd --user unit on Linux, and a
+// logon-triggered Scheduled Task on Windows.
 package service
 
-import (
-	"path/filepath"
+import "claude-observability-setup/internal/envwriter"
 
-	"claude-observability-setup/internal/envwriter"
-)
-
-// Config holds everything an OS-specific installer needs to register the
-// collector as a background service.
+// Config holds everything an OS-specific installer needs to register a
+// program as a background service. Generic over what it runs — the same
+// package installs the wizard-built dash-generator binary today and the
+// future collector binary later, with no per-program logic in here.
 type Config struct {
-	RepoRoot  string          // absolute path to the claude-observability checkout
-	NodeBin   string          // absolute path to `node`, from exec.LookPath("node")
-	ClaudeBin string          // absolute path to `claude`, from exec.LookPath("claude")
-	Env       []envwriter.Var // collector env vars to bake in (CLAUDE_DIR, EXPORTER_STREAM, ...)
-	LogDir    string          // absolute path for stdout/stderr logs
-}
-
-// CollectorScript returns the absolute path to collector/collector.mjs
-// under cfg.RepoRoot.
-func (c Config) CollectorScript() string {
-	return filepath.Join(c.RepoRoot, "collector", "collector.mjs")
+	Label      string // service identifier: reverse-DNS on macOS, unit/task name elsewhere
+	Command    string // absolute path to the executable to run
+	Args       []string
+	WorkingDir string
+	Env        []envwriter.Var
+	LogDir     string // absolute path for stdout/stderr logs
 }

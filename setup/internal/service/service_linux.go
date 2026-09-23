@@ -10,14 +10,16 @@ import (
 	"strings"
 )
 
-const unitName = "claude-observability-collector.service"
-
-func unitPath() (string, error) {
+func unitPath(label string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".config", "systemd", "user", unitName), nil
+	name := label
+	if !strings.HasSuffix(name, ".service") {
+		name += ".service"
+	}
+	return filepath.Join(home, ".config", "systemd", "user", name), nil
 }
 
 // GenerateUnit renders the systemd --user unit file for cfg.
@@ -26,32 +28,38 @@ func GenerateUnit(cfg Config) string {
 	for _, v := range cfg.Env {
 		fmt.Fprintf(&envLines, "Environment=%s=%s\n", v.Name, v.Value)
 	}
-	pathEnv := filepath.Dir(cfg.NodeBin) + ":" + filepath.Dir(cfg.ClaudeBin) + ":/usr/local/bin:/usr/bin:/bin"
+	pathEnv := filepath.Dir(cfg.Command) + ":/usr/local/bin:/usr/bin:/bin"
+	execLine := cfg.Command
+	for _, a := range cfg.Args {
+		execLine += " " + a
+	}
+	base := strings.TrimSuffix(filepath.Base(cfg.Command), filepath.Ext(cfg.Command))
 
 	return fmt.Sprintf(`[Unit]
-Description=claude-observability collector
+Description=%s
 
 [Service]
 Type=simple
 WorkingDirectory=%s
 Environment=PATH=%s
-%sExecStart=%s %s
+%sExecStart=%s
 Restart=always
 StandardOutput=append:%s
 StandardError=append:%s
 
 [Install]
 WantedBy=default.target
-`, filepath.Join(cfg.RepoRoot, "collector"), pathEnv, envLines.String(), cfg.NodeBin, cfg.CollectorScript(),
-		filepath.Join(cfg.LogDir, "collector.log"), filepath.Join(cfg.LogDir, "collector.err.log"))
+`, cfg.Label, cfg.WorkingDir, pathEnv, envLines.String(), execLine,
+		filepath.Join(cfg.LogDir, base+".log"), filepath.Join(cfg.LogDir, base+".err.log"))
 }
 
 // Install writes the unit file and enables + starts it via systemctl --user.
 func Install(cfg Config) error {
-	path, err := unitPath()
+	path, err := unitPath(cfg.Label)
 	if err != nil {
 		return err
 	}
+	unitName := filepath.Base(path)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
