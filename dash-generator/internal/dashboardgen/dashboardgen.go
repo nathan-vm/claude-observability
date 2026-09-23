@@ -4,9 +4,14 @@ package dashboardgen
 
 import (
 	"fmt"
+	"math"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
+
+	"claude-observability-dash-generator/internal/lokiclient"
 )
 
 // Cutlines are the three rate-panel threshold lines for one account:
@@ -143,4 +148,147 @@ func replaceVariable(dashboard, variable map[string]interface{}) {
 		list = append([]interface{}{variable}, list...)
 	}
 	templating["list"] = list
+}
+
+func discoverAccounts(lokiURL string) ([]string, error) {
+	series, err := lokiclient.Query(lokiURL,
+		"sum by (user_email) (count_over_time({service_name=\"claude-code\"} | event_name = `api_request` [7d]))",
+		time.Now().Unix())
+	if err != nil {
+		return nil, err
+	}
+	set := map[string]bool{}
+	for _, s := range series {
+		if e := s.Metric["user_email"]; e != "" {
+			set[e] = true
+		}
+	}
+	emails := make([]string, 0, len(set))
+	for e := range set {
+		emails = append(emails, e)
+	}
+	sort.Strings(emails)
+	return emails, nil
+}
+
+// rateCutlines computes the P75/outlier/extreme thresholds over an
+// account's last 7 days of the given rate field ("rate", "rate_input", or
+// "rate_output"), counting only buckets with actual request activity (an
+// EWMA never quite reaches zero, so idle buckets would pull the quantiles
+// down to meaninglessness). Falls back to fixed defaults on any Loki
+// error or fewer than 20 qualifying samples.
+func rateCutlines(lokiURL, exporterStream, rateHalfLife, email, field string) Cutlines {
+	pattern := escapeRegex(email)
+	end := time.Now().Unix()
+	start := end - 7*24*3600
+
+	smoothedExpr := fmt.Sprintf(
+		"sum(last_over_time({service_name=\"claude-code-rate\", halflife=\"%s\"} | user_email =~ `%s` | unwrap %s [5m]) by (user_email))",
+		rateHalfLife, pattern, field)
+	activeExpr := fmt.Sprintf(
+		"sum(count_over_time({service_name=\"claude-code\"} | event_name = `api_request` | user_email =~ `%s` [5m]))",
+		pattern)
+
+	smoothed, errS := lokiclient.QueryRange(lokiURL, smoothedExpr, start, end, 300)
+	active, errA := lokiclient.QueryRange(lokiURL, activeExpr, start, end, 300)
+	if errS != nil || errA != nil {
+		return cutlineFallback
+	}
+
+	busy := map[string]bool{}
+	if len(active) > 0 {
+		for _, v := range active[0].Values {
+			if count, err := strconv.ParseFloat(v[1], 64); err == nil && count > 0 {
+				busy[v[0]] = true
+			}
+		}
+	}
+	var values []float64
+	if len(smoothed) > 0 {
+		for _, v := range smoothed[0].Values {
+			if !busy[v[0]] {
+				continue
+			}
+			val, err := strconv.ParseFloat(v[1], 64)
+			if err != nil || math.IsInf(val, 0) || !(val > 0) {
+				continue
+			}
+			values = append(values, val)
+		}
+	}
+	sort.Float64s(values)
+	if len(values) < 20 {
+		return cutlineFallback
+	}
+	q1, _ := quantile(values, 0.25)
+	q3, _ := quantile(values, 0.75)
+	iqr := q3 - q1
+	return Cutlines{
+		P75:      int64(math.Round(q3)),
+		Outlier:  int64(math.Round(q3 + 1.5*iqr)),
+		Extreme:  int64(math.Round(q3 + 3*iqr)),
+		Fallback: false,
+	}
+}
+
+// Option is one dropdown-filter choice (a value plus its display text).
+type Option struct {
+	Text, Value string
+}
+
+// skillOwners lists the plugin-skill owners an account used over the last
+// 30 days. "local" (no plugin prefix) gets a friendlier display label.
+func skillOwners(lokiURL, exporterStream, email string) []Option {
+	expr := fmt.Sprintf(
+		"sum by (skill_owner) (count_over_time({service_name=\"%s\", kind=\"skills\"} | user_email =~ `%s` [1h]))",
+		exporterStream, escapeRegex(email))
+	end := time.Now().Unix()
+	result, err := lokiclient.QueryRange(lokiURL, expr, end-30*24*3600, end, 3600)
+	if err != nil {
+		return nil
+	}
+	set := map[string]bool{}
+	for _, s := range result {
+		if o := s.Metric["skill_owner"]; o != "" {
+			set[o] = true
+		}
+	}
+	owners := make([]string, 0, len(set))
+	for o := range set {
+		owners = append(owners, o)
+	}
+	sort.Strings(owners)
+	out := make([]Option, 0, len(owners))
+	for _, o := range owners {
+		text := o
+		if o == "local" {
+			text = "local (no plugin)"
+		}
+		out = append(out, Option{Text: text, Value: escapeRegex(o)})
+	}
+	return out
+}
+
+// mcpServers lists the MCP servers an account used over the last 30 days.
+func mcpServers(lokiURL, exporterStream, email string) []string {
+	expr := fmt.Sprintf(
+		"sum by (mcp_server) (count_over_time({service_name=\"%s\", kind=\"tools\"} | user_email =~ `%s` | tool_source = `mcp` [1h]))",
+		exporterStream, escapeRegex(email))
+	end := time.Now().Unix()
+	result, err := lokiclient.QueryRange(lokiURL, expr, end-30*24*3600, end, 3600)
+	if err != nil {
+		return nil
+	}
+	set := map[string]bool{}
+	for _, s := range result {
+		if m := s.Metric["mcp_server"]; m != "" {
+			set[m] = true
+		}
+	}
+	servers := make([]string, 0, len(set))
+	for m := range set {
+		servers = append(servers, m)
+	}
+	sort.Strings(servers)
+	return servers
 }

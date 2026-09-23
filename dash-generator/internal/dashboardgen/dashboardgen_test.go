@@ -1,6 +1,12 @@
 package dashboardgen
 
-import "testing"
+import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
 
 func TestSlug(t *testing.T) {
 	cases := map[string]string{
@@ -114,5 +120,115 @@ func TestReplaceVariable_InsertsNewAndReplacesExisting(t *testing.T) {
 	}
 	if list[0].(map[string]interface{})["value"] != "2" {
 		t.Errorf("value = %v, want 2 (the replacement)", list[0])
+	}
+}
+
+func TestDiscoverAccounts_ReturnsSortedUniqueEmails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[
+			{"metric":{"user_email":"b@example.com"}},
+			{"metric":{"user_email":"a@example.com"}}
+		]}}`))
+	}))
+	defer srv.Close()
+
+	emails, err := discoverAccounts(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(emails) != 2 || emails[0] != "a@example.com" || emails[1] != "b@example.com" {
+		t.Errorf("emails = %v", emails)
+	}
+}
+
+func TestRateCutlines_ComputesFromBusyBucketsOnly(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query().Get("query")
+		switch {
+		case strings.Contains(query, "claude-code-rate"):
+			var vals []string
+			for i := 1; i <= 25; i++ {
+				vals = append(vals, fmt.Sprintf(`["%d","%d"]`, 1700000000+i*300, i))
+			}
+			w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[
+				{"metric":{},"values":[` + strings.Join(vals, ",") + `]}
+			]}}`))
+		default:
+			var vals []string
+			for i := 1; i <= 25; i++ {
+				vals = append(vals, fmt.Sprintf(`["%d","1"]`, 1700000000+i*300))
+			}
+			w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[
+				{"metric":{},"values":[` + strings.Join(vals, ",") + `]}
+			]}}`))
+		}
+	}))
+	defer srv.Close()
+
+	cut := rateCutlines(srv.URL, "claude-code-exporter-1", "20m", "a@example.com", "rate")
+	if cut.Fallback {
+		t.Fatal("got fallback cutlines, want computed (25 >= 20 samples)")
+	}
+	if cut.P75 <= 0 || cut.Outlier < cut.P75 || cut.Extreme < cut.Outlier {
+		t.Errorf("cutlines not monotonically increasing: %+v", cut)
+	}
+}
+
+func TestRateCutlines_FewSamplesFallsBack(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[
+			{"metric":{},"values":[["1700000000","5"]]}
+		]}}`))
+	}))
+	defer srv.Close()
+
+	cut := rateCutlines(srv.URL, "claude-code-exporter-1", "20m", "a@example.com", "rate")
+	if !cut.Fallback || cut.P75 != cutlineFallback.P75 {
+		t.Errorf("cutlines = %+v, want fallback", cut)
+	}
+}
+
+func TestRateCutlines_LokiErrorFallsBack(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	cut := rateCutlines(srv.URL, "claude-code-exporter-1", "20m", "a@example.com", "rate")
+	if !cut.Fallback {
+		t.Error("want fallback on Loki error")
+	}
+}
+
+func TestSkillOwners_LabelsLocalSpecially(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[
+			{"metric":{"skill_owner":"local"}},
+			{"metric":{"skill_owner":"superpowers"}}
+		]}}`))
+	}))
+	defer srv.Close()
+
+	owners := skillOwners(srv.URL, "claude-code-exporter-1", "a@example.com")
+	if len(owners) != 2 {
+		t.Fatalf("got %d owners", len(owners))
+	}
+	if owners[0].Text != "local (no plugin)" {
+		t.Errorf("owners[0] = %+v", owners[0])
+	}
+}
+
+func TestMcpServers_ReturnsSortedNames(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[
+			{"metric":{"mcp_server":"github"}},
+			{"metric":{"mcp_server":"filesystem"}}
+		]}}`))
+	}))
+	defer srv.Close()
+
+	servers := mcpServers(srv.URL, "claude-code-exporter-1", "a@example.com")
+	if len(servers) != 2 || servers[0] != "filesystem" || servers[1] != "github" {
+		t.Errorf("servers = %v", servers)
 	}
 }
