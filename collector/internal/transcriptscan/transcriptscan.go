@@ -5,11 +5,16 @@ package transcriptscan
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -637,4 +642,140 @@ func RebuildSkillRecords(lokiURL, exporterStream string, dedupDays int, pluginSk
 func parseIntOr0(s string) int64 {
 	n, _ := strconv.ParseInt(s, 10, 64)
 	return n
+}
+
+type pushPayload struct {
+	Streams []pushStreamEntry `json:"streams"`
+}
+type pushStreamEntry struct {
+	Stream map[string]string `json:"stream"`
+	Values []pushValueEntry  `json:"values"`
+}
+type pushValueEntry [3]interface{}
+
+// PushToLoki sorts records by timestamp (Loki rejects too-far-out-of-order
+// writes within a stream, and the initial backfill interleaves many files
+// in time), chunks by batchSize, and pushes each chunk — grouped by its
+// exact stream labels, since tool and skill records can't share one push.
+// Each chunk retries up to 5 times with linear backoff to tolerate Loki's
+// cold-start "empty ring" error. A 400 containing "too far behind" is NOT
+// retried (that chunk can never succeed later either) — those records go
+// to skipped, not pushed, so the caller's dedup doesn't lock them out once
+// the blocking window ages out. A 429 gets the same retry/backoff as a
+// 5xx (seen during full reimports outrunning per-user ingest limits). Any
+// other 4xx aborts immediately. A fixed 300ms pace gap follows every
+// successful non-final chunk.
+func PushToLoki(lokiURL string, batchSize int, defaultLabels map[string]string, records []Record, log func(string, ...any)) (pushed, skipped []Record, err error) {
+	if len(records) == 0 {
+		return nil, nil, nil
+	}
+	ordered := append([]Record{}, records...)
+	sort.Slice(ordered, func(i, j int) bool {
+		a, _ := strconv.ParseInt(ordered[i].TimestampNs, 10, 64)
+		b, _ := strconv.ParseInt(ordered[j].TimestampNs, 10, 64)
+		return a < b
+	})
+
+	pushURL, urlErr := url.Parse(lokiURL)
+	if urlErr != nil {
+		return nil, nil, fmt.Errorf("invalid loki url %q: %w", lokiURL, urlErr)
+	}
+	pushURL.Path = "/loki/api/v1/push"
+
+	for i := 0; i < len(ordered); i += batchSize {
+		end := i + batchSize
+		if end > len(ordered) {
+			end = len(ordered)
+		}
+		chunk := ordered[i:end]
+
+		byLabelsKey := map[string]*pushStreamEntry{}
+		var order []string
+		for _, r := range chunk {
+			labels := r.StreamLabels
+			if labels == nil {
+				labels = defaultLabels
+			}
+			key := labelsKey(labels)
+			entry, ok := byLabelsKey[key]
+			if !ok {
+				entry = &pushStreamEntry{Stream: labels}
+				byLabelsKey[key] = entry
+				order = append(order, key)
+			}
+			entry.Values = append(entry.Values, pushValueEntry{r.TimestampNs, r.Line, r.Meta})
+		}
+		payload := pushPayload{}
+		for _, key := range order {
+			payload.Streams = append(payload.Streams, *byLabelsKey[key])
+		}
+		body, marshalErr := json.Marshal(payload)
+		if marshalErr != nil {
+			return nil, nil, marshalErr
+		}
+
+		var lastErr error
+		tooOld := false
+		for attempt := 0; attempt < 5; attempt++ {
+			if attempt > 0 {
+				time.Sleep(time.Duration(2000*attempt) * time.Millisecond)
+			}
+			resp, reqErr := http.Post(pushURL.String(), "application/json", bytes.NewReader(body))
+			if reqErr != nil {
+				lastErr = fmt.Errorf("push failed: %v", reqErr)
+				continue
+			}
+			respBody, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				lastErr = nil
+				break
+			}
+			lastErr = fmt.Errorf("push failed %d: %s", resp.StatusCode, truncateStr(string(respBody), 200))
+			if resp.StatusCode == 400 && strings.Contains(strings.ToLower(string(respBody)), "too far behind") {
+				tooOld = true
+				break
+			}
+			if resp.StatusCode != 429 && resp.StatusCode >= 400 && resp.StatusCode < 500 {
+				break
+			}
+		}
+
+		if !tooOld && lastErr == nil && end < len(ordered) {
+			time.Sleep(300 * time.Millisecond)
+		}
+		if tooOld {
+			log("%d record(s) rejected as too old by Loki, skipped: %v", len(chunk), lastErr)
+			skipped = append(skipped, chunk...)
+			continue
+		}
+		if lastErr != nil {
+			return pushed, skipped, lastErr
+		}
+		pushed = append(pushed, chunk...)
+	}
+	return pushed, skipped, nil
+}
+
+func labelsKey(labels map[string]string) string {
+	keys := make([]string, 0, len(labels))
+	for k := range labels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(labels[k])
+		b.WriteByte(';')
+	}
+	return b.String()
+}
+
+func truncateStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }

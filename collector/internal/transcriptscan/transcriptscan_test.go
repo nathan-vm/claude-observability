@@ -498,3 +498,142 @@ func TestRebuildSkillRecords_SplitsSaturatedWindow(t *testing.T) {
 		t.Errorf("got %d Loki calls, want the saturated window to have split into at least 2 sub-windows (3+ total calls)", calls)
 	}
 }
+
+func TestPushToLoki_SplitsIntoBatchSizeChunks(t *testing.T) {
+	var pushCalls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&pushCalls, 1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	records := make([]Record, 5)
+	for i := range records {
+		records[i] = Record{TimestampNs: strconv.Itoa(1700000000000000000 + i), Line: "x", Meta: map[string]string{"tool_use_id": strconv.Itoa(i)}}
+	}
+	pushed, skipped, err := PushToLoki(srv.URL, 2, map[string]string{"service_name": "s", "kind": "tools"}, records, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pushed) != 5 || len(skipped) != 0 {
+		t.Fatalf("pushed=%d skipped=%d", len(pushed), len(skipped))
+	}
+	if pushCalls != 3 { // ceil(5/2)
+		t.Errorf("push calls = %d, want 3", pushCalls)
+	}
+}
+
+func TestPushToLoki_TooFarBehindGoesToSkippedNotRetried(t *testing.T) {
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("entry too far behind"))
+	}))
+	defer srv.Close()
+
+	records := []Record{{TimestampNs: "1700000000000000000", Line: "x", Meta: map[string]string{"tool_use_id": "a"}}}
+	pushed, skipped, err := PushToLoki(srv.URL, 100, map[string]string{"service_name": "s"}, records, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(skipped) != 1 || len(pushed) != 0 {
+		t.Fatalf("pushed=%d skipped=%d", len(pushed), len(skipped))
+	}
+	if attempts != 1 {
+		t.Errorf("attempts = %d, want 1 (not retried)", attempts)
+	}
+}
+
+func TestPushToLoki_OtherFourHundredAbortsImmediately(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("nope"))
+	}))
+	defer srv.Close()
+
+	records := []Record{{TimestampNs: "1700000000000000000", Line: "x", Meta: map[string]string{"tool_use_id": "a"}}}
+	_, _, err := PushToLoki(srv.URL, 100, map[string]string{"service_name": "s"}, records, t.Logf)
+	if err == nil {
+		t.Error("want error for a non-retryable, non-too-old 4xx")
+	}
+}
+
+func TestPushToLoki_RetriesOnServerErrorThenSucceeds(t *testing.T) {
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&attempts, 1)
+		if n < 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	records := []Record{{TimestampNs: "1700000000000000000", Line: "x", Meta: map[string]string{"tool_use_id": "a"}}}
+	pushed, _, err := PushToLoki(srv.URL, 100, map[string]string{"service_name": "s"}, records, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pushed) != 1 {
+		t.Fatalf("pushed=%d, want 1 after the retry succeeded", len(pushed))
+	}
+	if attempts < 2 {
+		t.Errorf("attempts = %d, want a retry to have happened", attempts)
+	}
+}
+
+func TestPushToLoki_RetriesOn429LikeServerError(t *testing.T) {
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&attempts, 1)
+		if n < 2 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	records := []Record{{TimestampNs: "1700000000000000000", Line: "x", Meta: map[string]string{"tool_use_id": "a"}}}
+	pushed, _, err := PushToLoki(srv.URL, 100, map[string]string{"service_name": "s"}, records, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pushed) != 1 {
+		t.Errorf("pushed=%d, want 1 (429 retried like a 5xx, not aborted)", len(pushed))
+	}
+}
+
+func TestPushToLoki_GroupsByExplicitStreamLabelsWhenSet(t *testing.T) {
+	var receivedStreams int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		json.NewDecoder(r.Body).Decode(&body)
+		streams, _ := body["streams"].([]interface{})
+		receivedStreams = len(streams)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	records := []Record{
+		{TimestampNs: "1700000000000000000", Line: "x", Meta: map[string]string{"tool_use_id": "a"}}, // default (tools) labels
+		{TimestampNs: "1700000000000000001", Line: "y", DedupKey: "skill:r1",
+			StreamLabels: map[string]string{"service_name": "s", "kind": "skills"}, Meta: map[string]string{}},
+	}
+	_, _, err := PushToLoki(srv.URL, 100, map[string]string{"service_name": "s", "kind": "tools"}, records, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receivedStreams != 2 {
+		t.Errorf("got %d streams in the push payload, want 2 (tools and skills grouped separately)", receivedStreams)
+	}
+}
+
+func TestPushToLoki_EmptyRecordsIsNoop(t *testing.T) {
+	pushed, skipped, err := PushToLoki("http://unused.invalid", 100, nil, nil, t.Logf)
+	if err != nil || len(pushed) != 0 || len(skipped) != 0 {
+		t.Errorf("pushed=%v skipped=%v err=%v", pushed, skipped, err)
+	}
+}
