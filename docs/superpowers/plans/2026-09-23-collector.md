@@ -310,11 +310,13 @@ func TestExtractBashCommands_IndentedHeredocDelimiter(t *testing.T) {
 }
 
 func TestExtractBashCommands_UnterminatedHeredocFallsThroughAsText(t *testing.T) {
-	// No closing "EOF" line at all — heredocEnd must return -1 and the
-	// content falls through as ordinary text rather than panicking or
-	// hanging.
+	// heredocEnd returns -1 (no closing line), so the remainder is scanned
+	// as ORDINARY text, not swallowed: it still segments on the embedded
+	// newline, and "some" (a plausible-looking word) is picked up as a
+	// second, spurious candidate — "falls through as ordinary text" means
+	// "gets tokenized normally," not "produces no extra segments."
 	got := ExtractBashCommands("cat <<EOF\nsome text with no closer")
-	want := []string{"cat"}
+	want := []string{"cat", "some"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
@@ -337,10 +339,14 @@ func TestExtractBashCommands_RtkUnwrapsToRealCommand(t *testing.T) {
 }
 
 func TestExtractBashCommands_RejectsShellKeywords(t *testing.T) {
+	// Only the FIRST word of each ;-split segment is ever a candidate —
+	// "do" (segment 2's first word) is rejected as a keyword, so "echo"
+	// (same segment) never gets examined; the whole line yields nothing.
+	// Matches the JS's `let name = tokens[i]` picking exactly one
+	// candidate per segment, with no fallback to a later word.
 	got := ExtractBashCommands("for f in *; do echo $f; done")
-	want := []string{"echo"}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("got %v, want %v", got, want)
+	if len(got) != 0 {
+		t.Errorf("got %v, want none (keyword rejection drops the whole segment)", got)
 	}
 }
 
