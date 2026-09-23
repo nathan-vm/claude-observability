@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"claude-observability-collector/internal/lokiclient"
 	"claude-observability-collector/internal/shelltok"
 	"claude-observability-collector/internal/state"
 )
@@ -413,4 +414,120 @@ func ProcessTranscript(path string, fs state.FileState, pluginSkills map[string]
 		Offset: offset + consumed, PendingMain: pendingMain, PendingSub: pendingSub,
 		ActiveSkillMain: activeSkillMain, ActiveSkillSub: activeSkillSub,
 	}, nil
+}
+
+// ResolveEmails fills sessionEmail (in place) for every sessionID in
+// sessionIDs not already cached, by querying the session's own OTel data
+// for the most recent user_email it carries. A session with no match is
+// cached as "" too — otherwise every pass re-queries sessions that never
+// sent OTel telemetry at all.
+func ResolveEmails(lokiURL string, emailLookbackHours int, sessionEmail map[string]string, sessionIDs []string, log func(string, ...any)) {
+	var missing []string
+	for _, id := range sessionIDs {
+		if id == "" {
+			continue
+		}
+		if _, ok := sessionEmail[id]; !ok {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) == 0 {
+		return
+	}
+	endNs := time.Now().UnixNano()
+	startNs := endNs - int64(emailLookbackHours)*3600*1e9
+	for _, sessionID := range missing {
+		query := fmt.Sprintf("{service_name=\"claude-code\"} | session_id = `%s` | user_email != ``", sessionID)
+		results, err := lokiclient.QueryRange(lokiURL, query, startNs, endNs, 1, "backward")
+		if err != nil {
+			short := sessionID
+			if len(short) > 8 {
+				short = short[:8]
+			}
+			log("could not resolve the account for session %s: %v", short, err)
+			continue
+		}
+		email := ""
+		if len(results) > 0 {
+			email = results[0].Labels["user_email"]
+		}
+		sessionEmail[sessionID] = email
+	}
+}
+
+// ProjectOwners builds a project->email map from both Loki history and
+// the current batch (critical for a from-scratch import, where Loki
+// history is empty). A project maps to an email only if every observed
+// pairing used the same single email — ambiguous projects are left
+// unmapped.
+func ProjectOwners(lokiURL, exporterStream string, dedupDays int, batch []Record) (map[string]string, error) {
+	endNs := time.Now().UnixNano()
+	startNs := endNs - int64(dedupDays)*24*3600*1e9
+	query := fmt.Sprintf(`{service_name="%s", kind="tools"}`, exporterStream)
+	results, err := lokiclient.QueryRange(lokiURL, query, startNs, endNs, 5000, "backward")
+	if err != nil {
+		results = nil // fall back to batch-only, matching the JS's try/catch
+	}
+
+	seen := map[string]map[string]bool{}
+	note := func(project, email string) {
+		if project == "" || email == "" {
+			return
+		}
+		if seen[project] == nil {
+			seen[project] = map[string]bool{}
+		}
+		seen[project][email] = true
+	}
+	for _, r := range results {
+		note(r.Labels["project"], r.Labels["user_email"])
+	}
+	for _, record := range batch {
+		note(record.Meta["project"], record.Meta["user_email"])
+	}
+
+	owners := map[string]string{}
+	for project, emails := range seen {
+		if len(emails) == 1 {
+			for email := range emails {
+				owners[project] = email
+			}
+		}
+	}
+	return owners, nil
+}
+
+// DropAlreadySeen prunes seen entries older than dedupDays, then splits
+// records into fresh (not previously exported, and not a duplicate
+// within this same batch) and the staged dedup keys (novos) the caller
+// commits to seen only after a successful push. A record with neither
+// DedupKey nor a tool_use_id in Meta always passes through.
+func DropAlreadySeen(seen map[string]int64, dedupDays int, records []Record) (fresh []Record, novos map[string]int64) {
+	cutoff := time.Now().Add(-time.Duration(dedupDays) * 24 * time.Hour).UnixMilli()
+	for id, ts := range seen {
+		if ts < cutoff {
+			delete(seen, id)
+		}
+	}
+	novos = map[string]int64{}
+	for _, record := range records {
+		id := record.DedupKey
+		if id == "" {
+			id = record.Meta["tool_use_id"]
+		}
+		if id == "" {
+			fresh = append(fresh, record)
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		if _, ok := novos[id]; ok {
+			continue
+		}
+		ts, _ := strconv.ParseInt(record.TimestampNs, 10, 64)
+		novos[id] = ts / 1e6
+		fresh = append(fresh, record)
+	}
+	return fresh, novos
 }

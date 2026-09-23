@@ -2,9 +2,13 @@ package transcriptscan
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"claude-observability-collector/internal/state"
 )
@@ -253,5 +257,116 @@ func TestProcessTranscript_ShrunkFileResetsEverything(t *testing.T) {
 	}
 	if fs.PendingMain == nil || fs.PendingMain.SessionID != "s1" {
 		t.Errorf("pending after shrink+rescan = %+v, want a fresh group from session s1, not the stale one", fs.PendingMain)
+	}
+}
+
+func TestResolveEmails_ResolvesAndCachesEmptyResult(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query().Get("query")
+		if strings.Contains(q, "s1") {
+			w.Write([]byte(`{"status":"success","data":{"resultType":"streams","result":[
+				{"stream":{"user_email":"a@example.com"},"values":[["1","x"]]}
+			]}}`))
+			return
+		}
+		w.Write([]byte(`{"status":"success","data":{"resultType":"streams","result":[]}}`))
+	}))
+	defer srv.Close()
+
+	sessionEmail := map[string]string{}
+	ResolveEmails(srv.URL, 720, sessionEmail, []string{"s1", "s2"}, t.Logf)
+	if sessionEmail["s1"] != "a@example.com" {
+		t.Errorf("s1 = %q", sessionEmail["s1"])
+	}
+	if _, ok := sessionEmail["s2"]; !ok {
+		t.Error("s2 must be cached as empty, not left unresolved (so it's never re-queried)")
+	}
+	if sessionEmail["s2"] != "" {
+		t.Errorf("s2 = %q, want empty", sessionEmail["s2"])
+	}
+}
+
+func TestResolveEmails_SkipsAlreadyCachedSessions(t *testing.T) {
+	queried := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queried = true
+		w.Write([]byte(`{"status":"success","data":{"resultType":"streams","result":[]}}`))
+	}))
+	defer srv.Close()
+
+	sessionEmail := map[string]string{"s1": "cached@example.com"}
+	ResolveEmails(srv.URL, 720, sessionEmail, []string{"s1"}, t.Logf)
+	if queried {
+		t.Error("must not re-query an already-cached session")
+	}
+}
+
+func TestProjectOwners_OnlyMapsUnambiguousProjects(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"status":"success","data":{"resultType":"streams","result":[
+			{"stream":{"project":"solo","user_email":"a@example.com"},"values":[["1","x"]]},
+			{"stream":{"project":"shared","user_email":"a@example.com"},"values":[["1","x"]]},
+			{"stream":{"project":"shared","user_email":"b@example.com"},"values":[["1","x"]]}
+		]}}`))
+	}))
+	defer srv.Close()
+
+	owners, err := ProjectOwners(srv.URL, "s", 90, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owners["solo"] != "a@example.com" {
+		t.Errorf("solo = %q", owners["solo"])
+	}
+	if _, ok := owners["shared"]; ok {
+		t.Error("a project with 2+ distinct emails must be left unmapped")
+	}
+}
+
+func TestProjectOwners_IncludesCurrentBatch(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"status":"success","data":{"resultType":"streams","result":[]}}`))
+	}))
+	defer srv.Close()
+
+	batch := []Record{{Meta: map[string]string{"project": "fresh", "user_email": "a@example.com"}}}
+	owners, err := ProjectOwners(srv.URL, "s", 90, batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owners["fresh"] != "a@example.com" {
+		t.Errorf("owners = %v, want the batch-only project mapped", owners)
+	}
+}
+
+func TestDropAlreadySeen_FiltersCrossBatchAndSameBatchDuplicates(t *testing.T) {
+	seen := map[string]int64{"already": time.Now().UnixMilli()}
+	records := []Record{
+		{Meta: map[string]string{"tool_use_id": "already"}},
+		{Meta: map[string]string{"tool_use_id": "fresh1"}},
+		{Meta: map[string]string{"tool_use_id": "fresh1"}}, // duplicate within this same batch
+	}
+	fresh, novos := DropAlreadySeen(seen, 90, records)
+	if len(fresh) != 1 {
+		t.Fatalf("got %d fresh, want 1", len(fresh))
+	}
+	if _, ok := novos["fresh1"]; !ok {
+		t.Error("novos must stage the newly-seen key")
+	}
+}
+
+func TestDropAlreadySeen_PrunesEntriesOlderThanDedupDays(t *testing.T) {
+	oldMs := time.Now().AddDate(0, 0, -100).UnixMilli()
+	seen := map[string]int64{"stale": oldMs}
+	DropAlreadySeen(seen, 90, nil)
+	if _, ok := seen["stale"]; ok {
+		t.Error("entries older than dedupDays must be pruned")
+	}
+}
+
+func TestDropAlreadySeen_RecordWithNoIDAlwaysPasses(t *testing.T) {
+	fresh, _ := DropAlreadySeen(map[string]int64{}, 90, []Record{{Meta: map[string]string{}}})
+	if len(fresh) != 1 {
+		t.Error("a record with neither dedupKey nor tool_use_id must always pass through")
 	}
 }
