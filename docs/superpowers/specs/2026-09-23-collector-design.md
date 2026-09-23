@@ -191,9 +191,45 @@ needs to produce a valid zero-value `State` on ENOENT, matching the JS's
 
 ## `internal/lokiclient`
 
-Identical to `dash-generator/internal/lokiclient` (`Query`,
-`QueryRange`, `Push`, `Series`/`Stream`/`StreamValue` types) — see that
-spec for the exact shape. Duplicated here per "Module layout" above.
+**Correction from this spec's first draft**, found by reading
+`transcript-scan.mjs` line-by-line rather than paraphrasing: this is
+**not** identical to `dash-generator/internal/lokiclient`. Every Loki call
+in `transcript-scan.mjs` (`resolveEmails`, `seedSeenFromLoki`,
+`projectOwners`, `rebuildSkillRecords`) queries raw **log lines** — a bare
+`{selector} | filters` with no `sum(...)`/`count_over_time(...)`
+aggregation — which returns Loki's `"streams"` result type (`stream:
+{labels}` + `values: [[timestampNs, line], ...]`), not the `"vector"`/
+`"matrix"` metric shape `dash-generator`'s client parses (whose JSON key
+is `metric`, not `stream`). The two are structurally close (both are
+labels + timestamped pairs) but the JSON field name differs and would
+silently deserialize empty if reused as-is. Timestamps are also
+nanosecond Unix integers here (matching exactly what every call site
+below computes), not the unix-*seconds* `dash-generator` uses.
+
+```go
+type StreamResult struct {
+    Labels map[string]string
+    Values [][2]string // [timestamp_ns_as_string, line_text]
+}
+
+// QueryRange runs a log-query range request. start/end are nanosecond
+// Unix timestamps. limit <= 0 omits the "limit" param; direction == ""
+// omits "direction".
+func QueryRange(lokiURL, query string, startNs, endNs int64, limit int, direction string) ([]StreamResult, error)
+
+// Push posts to /loki/api/v1/push — identical shape/behavior to
+// dash-generator's (same Stream/StreamValue types), duplicated rather
+// than shared per this repo's independently-deployed-binaries convention.
+type Stream struct {
+    Labels map[string]string
+    Values []StreamValue
+}
+type StreamValue struct {
+    TimestampNs, Line string
+    Metadata           map[string]string
+}
+func Push(lokiURL string, streams []Stream) error
+```
 
 ## `internal/transcriptscan` — the port of `transcript-scan.mjs`
 
