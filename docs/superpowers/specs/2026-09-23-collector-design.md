@@ -1,4 +1,4 @@
-# Collector (Go) — Design
+# Collector — Design
 
 Date: 2026-09-23
 Status: approved-pending-review
@@ -184,7 +184,7 @@ Deliberately **not** carrying over `otelSkills` (confirmed dead in the JS —
 declared in `emptyState()`, never read or written anywhere else) or
 `ratePublished` (now owned solely by dashboard-server's own state file).
 `version` stays `2` for continuity of intent, though this is a fresh file
-(`.state/collector-go-state.json`, not the JS's `.state/
+(`.state/collector-state.json`, not the JS's `.state/
 collector-state.json`) so no real migration happens — Go's `Load` just
 needs to produce a valid zero-value `State` on ENOENT, matching the JS's
 "missing file -> `emptyState()`" behavior.
@@ -518,7 +518,7 @@ Env vars: `CLAUDE_DIR`, `CLAUDE_OBSERVABILITY_EXTRA_DIRS`, `LOKI_URL`
 (default `http://localhost:47100`), `EXPORTER_STREAM` (default
 `claude-code-exporter-1`), `POLL_SECONDS`, `BATCH_SIZE`,
 `ORPHAN_AFTER_MS`, `DEDUP_DAYS`, `EMAIL_LOOKBACK_HOURS`, `STATE_FILE`
-(default `<repo root>/.state/collector-go-state.json`).
+(default `<repo root>/.state/collector-state.json`).
 
 Requires being run from the repo root only for its default `STATE_FILE`
 location — unlike the wizard/dashboard-server, everything else it touches
