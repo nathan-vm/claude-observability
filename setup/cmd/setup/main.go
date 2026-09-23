@@ -120,11 +120,18 @@ func run() error {
 	}
 
 	fmt.Fprintln(out, "\n── Dash generator ─────────────────────────────────────────")
-	fmt.Fprintln(out, "  Generates per-account Grafana dashboards and publishes the rate panel —")
-	fmt.Fprintln(out, "  transcript scanning / usage-truth aren't wired up to this wizard yet.")
+	fmt.Fprintln(out, "  Generates per-account Grafana dashboards and publishes the rate panel.")
 	if wizard.AskYesNo(out, stdin, "  Install the dash generator as a background service now?", true) {
 		if err := installService(repoRoot, collectorVars); err != nil {
 			return fmt.Errorf("installing dash generator service: %w", err)
+		}
+		fmt.Fprintln(out, "  installed and started")
+	}
+
+	fmt.Fprintln(out, "\n── Collector ─────────────────────────────────────────────────")
+	if wizard.AskYesNo(out, stdin, "  Install the collector as a background service now?", true) {
+		if err := installCollectorService(repoRoot, collectorVars); err != nil {
+			return fmt.Errorf("installing collector service: %w", err)
 		}
 		fmt.Fprintln(out, "  installed and started")
 	}
@@ -225,5 +232,50 @@ func dashGeneratorLabel() string {
 		return "ClaudeObservabilityDashGenerator"
 	default:
 		return "claude-observability-dash-generator"
+	}
+}
+
+func installCollectorService(repoRoot string, collectorVars []envwriter.Var) error {
+	collectorBin, err := findCollectorBinary(repoRoot)
+	if err != nil {
+		return err
+	}
+	cfg := service.Config{
+		Label:      collectorLabel(),
+		Command:    collectorBin,
+		WorkingDir: repoRoot,
+		Env:        collectorVars,
+		LogDir:     filepath.Join(repoRoot, ".state"),
+	}
+	return service.Install(cfg)
+}
+
+// findCollectorBinary looks for a collector binary built alongside this
+// one (same directory as the running setup executable) or on PATH.
+func findCollectorBinary(repoRoot string) (string, error) {
+	name := "collector"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	if exe, err := os.Executable(); err == nil {
+		candidate := filepath.Join(filepath.Dir(exe), name)
+		if _, statErr := os.Stat(candidate); statErr == nil {
+			return candidate, nil
+		}
+	}
+	if path, err := exec.LookPath(name); err == nil {
+		return path, nil
+	}
+	return "", fmt.Errorf("%s not found next to this binary or on PATH — build it from collector/ or download it alongside claude-observability-setup", name)
+}
+
+func collectorLabel() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "com.agents-observability.collector"
+	case "windows":
+		return "ClaudeObservabilityCollector"
+	default:
+		return "claude-observability-collector"
 	}
 }
