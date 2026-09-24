@@ -29,7 +29,7 @@ service:
     # there is no backend for them: every panel reads from the logs pipeline
     # below (Loki), and the only thing metrics used to be for — listing which
     # accounts exist via Prometheus label_values — is now a Loki query instead
-    # (see discoverAccounts in collector/dashboard-generator.mjs).
+    # (see discoverAccounts in src/dash-generator/internal/dashboardgen).
     metrics:
       receivers: [otlp]
       processors: [batch]

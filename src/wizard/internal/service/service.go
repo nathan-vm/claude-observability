@@ -3,7 +3,7 @@
 // logon-triggered Scheduled Task on Windows.
 package service
 
-import "claude-observability-setup/internal/envwriter"
+import "claude-observability-wizard/internal/envwriter"
 
 // Config holds everything an OS-specific installer needs to register a
 // program as a background service. Generic over what it runs — the same

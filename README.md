@@ -7,12 +7,12 @@ general dev-setup project once this stack outgrew being one piece of it — this
 repo's only concern is getting telemetry flowing somewhere and turning it into
 dashboards; today "somewhere" is always localhost, this repo's own stack.
 
-Path: Claude Code → OTel Collector → Loki (logs) → Grafana. In parallel, the
-**collector** (a host process, not a container — see "The collector service"
-below) reads the local transcripts and runs the `claude` CLI to publish three
-things OTel alone doesn't give you: the real MCP and skill names, consumption
-measured over the real limit windows, and the real `/usage` numbers behind
-those windows.
+Path: Claude Code → OTel Collector → Loki (logs) → Grafana. In parallel, two
+self-contained Go binaries run as host processes (not containers — see "The
+collector service" below): the **collector** reads the local transcripts and
+runs the `claude` CLI to publish what OTel alone doesn't give you — the real
+MCP and skill names, and the real `/usage` numbers — and **dash-generator**
+publishes the consumption-rate series and generates each account's dashboard.
 
 ## Services
 
@@ -21,22 +21,26 @@ those windows.
 | OTel Collector   | `localhost:47317` (gRPC), `localhost:47318` (HTTP) | single OTLP ingest endpoint |
 | Grafana          | http://localhost:47300                             | dashboards (anonymous Viewer, `admin`/`admin` to edit) |
 | Loki             | http://localhost:47100                             | logs and events, 90d retention |
-| collector        | — (host process, not Docker)                       | real tool names, usage/rate meters, `/usage` ground truth, dashboard generation |
+| collector        | — (host process, not Docker)                       | real tool/skill names, `/usage` ground truth |
+| dash-generator   | — (host process, not Docker)                       | rate meter, per-account dashboard generation |
 
 ## Getting started
 
-Bring the stack up yourself first — setup never does this for you:
+Bring the stack up yourself first — the wizard never does this for you:
 
 ```sh
 docker compose up -d               # otel-collector + loki + grafana
 ```
 
-Then download the `claude-observability-setup` binary for your OS/arch from
-this repo's [Releases page](../../releases) (or build it yourself:
-`cd setup && go build ./cmd/setup`), and run it from the repo root:
+Then download the `claude-observability-wizard`, `dash-generator`, and
+`collector` binaries for your OS/arch from this repo's
+[Releases page](../../releases) (or build them yourself: `cd src/wizard &&
+go build ./cmd/wizard`, `cd src/dash-generator && go build ./cmd/dash-generator`,
+`cd src/collector && go build ./cmd/collector` — put all three in the same
+directory), and run the wizard from the repo root:
 
 ```sh
-./claude-observability-setup
+./claude-observability-wizard
 ```
 
 It **discovers on its own** which Claude Code config directories you have,
@@ -44,18 +48,17 @@ identifies the account behind each one, asks which ones you want to monitor,
 asks for the OTel endpoint and an optional token (prefilled with the local
 defaults — edit them if you're running docker on different ports), checks
 that the endpoint is actually reachable before writing anything, enables
-telemetry in the right shell/OS, and offers to install the collector as a
-background service. No Node, Python, or other runtime needed to run it — just
-the OS itself (Windows included).
+telemetry in the right shell/OS, and offers to install dash-generator and the
+collector as background services. No Node, Python, or other runtime needed to
+run any of the three — just the OS itself (Windows included).
 
 ### More than one account
 
 It is common to keep accounts split by context (`~/.claude-personal`,
 `~/.claude-work`), each with its own config directory. The first one is
 `CLAUDE_DIR`; the rest go in `CLAUDE_OBSERVABILITY_EXTRA_DIRS`, colon-separated
-like `$PATH` — `collector-old/accounts.mjs` reads both directly, as plain
-environment variables (the future Go collector's `internal/accounts` package
-will read the same two variables the same way):
+like `$PATH` — `src/collector/internal/accounts` reads both directly, as plain
+environment variables:
 
 ```sh
 export CLAUDE_DIR="$HOME/.claude-personal"
@@ -74,7 +77,7 @@ server — the panel read 4 thousand tokens where the real number was 268 thousa
 
 ## Enabling telemetry in every session
 
-The setup binary does this for you: bash/zsh rc, fish config, or on Windows,
+The wizard does this for you: bash/zsh rc, fish config, or on Windows,
 persistent user environment variables (`setx`) — whichever matches your OS,
 picked automatically. It writes the OTel telemetry vars
 (`OTEL_EXPORTER_OTLP_ENDPOINT`, and `OTEL_EXPORTER_OTLP_HEADERS` if you gave
@@ -87,24 +90,37 @@ Open a new terminal (or reload your shell config). The first data point
 arrives within a minute of the first prompt (that is the export interval; see
 "Resource usage").
 
-There is no `.env` file. Every knob covered on this page — `EXPORTER_STREAM`,
-`CLAUDE_DIR`, `RATE_HALFLIFE`, `POLL_SECONDS`, `DASHBOARD_INTERVAL_SECONDS`,
-`WEEK_START_DAY`/`WEEK_START_HOUR`, `TZ_OFFSET_HOURS` — is a plain environment
-variable, set in your shell rc alongside the OTel telemetry vars. Unset ones
-fall back to `collector.mjs`'s own built-in defaults (documented inline where
-each is read). `bin/install-service.sh` resolves them from your shell at
-install time and bakes them into the LaunchAgent, since `launchd` does not run
-a login/interactive shell and so never sources your rc on its own.
+There is no `.env` file. Every knob covered on this page is a plain
+environment variable, unset ones falling back to sensible built-in defaults
+(documented inline where each is read):
+
+| Var | Read by | Default |
+|---|---|---|
+| `CLAUDE_DIR`, `CLAUDE_OBSERVABILITY_EXTRA_DIRS` | collector | first discovered account dir |
+| `EXPORTER_STREAM` | collector, dash-generator | `claude-code-exporter-1` |
+| `LOKI_URL` | collector, dash-generator | `http://localhost:47100` |
+| `POLL_SECONDS` | collector, dash-generator (rate loop) | `60` |
+| `DEDUP_DAYS`, `BATCH_SIZE`, `ORPHAN_AFTER_MS`, `EMAIL_LOOKBACK_HOURS`, `STATE_FILE` | collector | see `src/collector/cmd/collector/main.go` |
+| `RATE_HALFLIFE`, `RATE_BACKFILL_DAYS`, `DASHBOARD_INTERVAL_SECONDS` | dash-generator | `20m`, `14`, `600` |
+
+The wizard's shell-rc block only carries `CLAUDE_DIR`,
+`CLAUDE_OBSERVABILITY_EXTRA_DIRS` and `EXPORTER_STREAM` — the ones it actually
+asks about. The rest are power-user knobs: set them in your shell before
+running a binary by hand, or add them to the installed service file directly
+(see "The collector service" below) if you want a background service to pick
+one up, since `launchd`/`systemd`/Task Scheduler do not source your shell rc
+on their own — only the vars the wizard explicitly baked into the service at
+install time are there.
 
 ## One dashboard per account — and nothing else
 
 There is no "all accounts" dashboard. Each account has its own MCP servers,
 plugins and configuration, and the numbers do not add up into anything useful.
 
-`collector/dashboard-generator.mjs` runs inside the collector service, on its
-own `DASHBOARD_INTERVAL_SECONDS` cadence (default 10 minutes — see "The
-collector service"). The first time a new account sends data, its dashboard
-shows up as **"Claude Code — <email>"**.
+`src/dash-generator` runs its dashboard-generation loop on its own
+`DASHBOARD_INTERVAL_SECONDS` cadence (default 10 minutes — see "The collector
+service"). The first time a new account sends data, its dashboard shows up as
+**"Claude Code — <email>"**.
 
 The single source is `grafana/templates/claude-code.json`. It deliberately sits
 **outside** `grafana/dashboards/`: that is the provisioned directory, and a
@@ -116,36 +132,35 @@ generator reads the template and swaps what is account-specific:
 - injects **that account's limit references** (see below);
 - fills the MCP server and skill owner filters with what the account actually used.
 
-Run it by hand: `node collector/dashboard-generator.mjs`. Accounts that
-disappear from the data have their file removed on the next run. The generated
-files contain emails, are specific to this machine, and are gitignored.
+Run it by hand: `cd src/dash-generator && go run ./cmd/dash-generator --once`.
+Accounts that disappear from the data have their file removed on the next
+run. The generated files contain emails, are specific to this machine, and
+are gitignored.
 
-## The limit windows (and why a rolling window was wrong)
+## The limit windows
 
 Anthropic enforces two windows, and **neither is a rolling window**:
 
 - **5h block**: it opens on your first message and expires 5h later. The next
-  block only opens on your next message. A `sum_over_time[5h]` adds the tail of
-  one block to the head of the next — a different measurement entirely.
-- **Week**: it resets on a fixed day. A `sum_over_time[7d]` drags in last week's
-  consumption.
+  block only opens on your next message. A `sum_over_time[5h]` would add the
+  tail of one block to the head of the next — a different measurement
+  entirely.
+- **Week**: it resets on a fixed day and hour that is **per account**, not a
+  global default (verified on two real accounts here: one resets Thursday
+  evening, the other Saturday afternoon). A `sum_over_time[7d]` would drag in
+  last week's consumption, and a single global guess at the reset day would
+  silently measure the wrong 7-day window.
 
-Finding the block boundary means scanning activity for the gap where the previous
-block expired. LogQL cannot do that, so **usage-meter.mjs** (inside the
-collector) does it: every pass it measures both windows per account and
-publishes the result back into Loki, on the `service_name="claude-code-usage"`
-stream. The gauges are then a direct read of that value.
-
-The weekly reset day and hour default to `WEEK_START_DAY=1` (Monday) and
-`WEEK_START_HOUR=0` in code — but that is only ever a fallback now. Anthropic
-resets each account's week on its **own** day and hour (verified on two real
-accounts here: one resets Thursday evening, the other Saturday afternoon —
-neither is Monday), so a single global guess was silently measuring the wrong
-7-day window for both. **usage-truth.mjs** fixes this per account: it parses
-the real reset moment out of `/usage`'s own "resets ..." text and writes
-`week_start_day`/`week_start_hour` into that account's entry in
-`account-limits.json`, which `usage-meter.mjs` then uses instead of the global
-default. See "The real numbers: usage-truth.mjs" below.
+An earlier version of this stack tried to derive both windows from raw OTel
+activity (finding the block boundary by scanning for the gap where the
+previous block expired, guessing the weekly reset day). That derivation —
+`usage-meter.mjs` — was dropped: it was a second, driftable measurement of
+something Anthropic already answers directly and authoritatively. The
+**collector**'s `usage-truth` step (see below) runs `/usage` via the `claude`
+CLI itself, per account, every poll, and publishes its two top-line
+percentages straight into Loki — no window math, no reset-day guessing, no
+drift. The Overview gauges (both the main "% used" pair and the "/usage says"
+pair — they read the same stream now) are a direct read of that value.
 
 ### The limit references
 
@@ -158,16 +173,15 @@ generated dashboards) — copy the template the first time:
 cp grafana/account-limits.example.json grafana/account-limits.json
 ```
 
-**Calibration is now automatic.** Every collector pass, `usage-truth.mjs` runs
-`/usage` for each account, reads that account's current `block_tokens`/
-`week_tokens` off the `claude-code-usage` stream, and writes
-`limit = meter_tokens / (usage_percentage / 100)` back into this file — the
-exact formula this section used to ask you to apply by hand. Accounts with no
-entry yet (or none usage-truth could reach — see below) fall back to the
-`default` block. To calibrate by hand instead, the manual steps still work:
-run `/usage` on the account, note both percentages, and compare them with what
-the meter published at that moment (`{service_name="claude-code-usage"} |
-user_email = \`<email>\``), then apply the same formula.
+This file is **purely user-set** — there is no more auto-calibration (that
+died with `usage-meter.mjs`, its only data source). Accounts with no entry
+fall back to the hardcoded default in `dashboardgen.go`
+(`Block5h: 1_750_000, Week: 21_500_000`). To calibrate by hand: run `/usage`
+on the account, note both percentages, compare them with what the collector
+last published for that account (`{service_name="claude-code-usage-truth"} |
+user_email = \`<email>\``) — which will already match, since it is the exact
+same `/usage` call — and set `limit = observed_tokens / (usage_percentage /
+100)` from whatever raw consumption number you're calibrating against.
 
 ### Why "new tokens"
 
@@ -188,9 +202,9 @@ It is exact per request, unlike the OTel metrics Claude Code also emits, which a
 per-session counters that go stale ~5min after a session ends. The Collector still
 accepts them (nothing breaks if a client sends them) but nothing stores or reads
 them — every panel, and the account list itself, reads Loki (see `discoverAccounts`
-in `collector/dashboard-generator.mjs`).
+in `src/dash-generator/internal/dashboardgen/dashboardgen.go`).
 
-### transcript-scan.mjs — what OTel redacts
+### The collector — what OTel redacts
 
 Claude Code **redacts the names of locally configured MCP servers across all of
 its OTel telemetry**: `mcp_server_name` becomes `custom` in the metrics, and since
@@ -203,9 +217,10 @@ https://code.claude.com/docs/en/monitoring-usage.
 The same redaction applies to **plugin skills**, which become `third-party` in
 `api_request`'s `skill_name`.
 
-The local transcripts keep both real names. `transcript-scan.mjs` scans every
-configured Claude Code directory (see "More than one account") **recursively**
-and publishes to `{service_name="$EXPORTER_STREAM"}`, with a `kind` label
+The local transcripts keep both real names. The collector's `transcriptscan`
+package (`src/collector/internal/transcriptscan`) scans every configured
+Claude Code directory (see "More than one account") **recursively** and
+publishes to `{service_name="$EXPORTER_STREAM"}`, with a `kind` label
 separating `tools` (one line per `tool_use` block) from `skills` (one line per
 skill-tagged request). The stream name is **versioned** — see "Rescan and
 reimport" below.
@@ -236,8 +251,9 @@ entirely (`cat file` → `rtk read file`) — so the exporter strips a leading
 show up as "rtk" instead of what it actually ran. A compound line
 (`git status && ls -la`) attributes the call's full tokens to **every**
 sub-command, not a split between them — that is a deliberate over-count in
-exchange for not hiding either command; see `extractBashCommands` and
-`settle` in `collector/transcript-scan.mjs`. These rows join the same
+exchange for not hiding either command; see `ExtractBashCommands` in
+`src/collector/internal/shelltok` and `Settle` in
+`src/collector/internal/transcriptscan`. These rows join the same
 "Tokens by tool" table MCP calls use, under a synthetic `bash` server bucket.
 
 #### About the skill numbers
@@ -279,8 +295,8 @@ low:
   `<session>/subagents/*.jsonl`. A single-level scan ignores them — that was 134
   files on one account alone.
 
-Hence the recursive scan of every directory `collector/accounts.mjs` resolves
-(see "More than one account").
+Hence the recursive scan of every directory `src/collector/internal/accounts`
+resolves (see "More than one account").
 
 #### How each call's account is discovered
 
@@ -311,18 +327,18 @@ the dedup map. Use it to generate a **new** record type out of existing history
 without rewriting anything:
 
 ```sh
-cd collector && node collector.mjs --rescan --once
+cd src/collector && go run ./cmd/collector --rescan --once
 ```
 
 **Reimport**: to redo the whole derivation (say, after changing how accounts or
 tokens are attributed), bump the stream generation — edit `EXPORTER_STREAM` in
-your shell rc, the single source `transcript-scan.mjs` and
-`dashboard-generator.mjs` both read, then open a new terminal (or `source` it)
-and restart the service so it picks up the new value. Then drop the state:
+your shell rc, the single source both the collector and dash-generator read,
+then open a new terminal (or `source` it) and restart both services so they
+pick up the new value (see "The collector service" for the per-OS restart
+commands). Then drop the state:
 
 ```sh
 rm -rf .state
-bin/install-service.sh restart
 ```
 
 The old generation is orphaned and ages out with the 90-day retention.
@@ -336,15 +352,15 @@ The old generation is orphaned and ages out with the 90-day retention.
 > already processed is not allowed`), so that window stays blind forever on that
 > stream. Hence the generation in the name.
 
-### usage-truth.mjs — the real numbers, straight from `/usage`
+### usage-truth — the real numbers, straight from `/usage`
 
-`usage-meter.mjs` derives the gauges from raw OTel activity — real, but a
-derivation, with three ways to drift from what Anthropic's server actually
-enforces: a stale calibration in `account-limits.json`, a wrong week-boundary
-guess (see "The limit windows" above), or Claude Code usage from another
-client/machine that never reached this stack's telemetry at all. `/usage`
-itself is the account's own authoritative answer, immune to all three — so
-`usage-truth.mjs` runs it directly, per account, every collector pass:
+`/usage` is the account's own authoritative answer — immune to the three ways
+a derivation could drift from what Anthropic's server actually enforces (a
+stale calibration, a wrong week-boundary guess, or Claude Code usage from
+another client/machine that never reached this stack's telemetry at all — see
+"The limit windows" above for why an earlier, derived version of this existed
+and was dropped). The collector's `internal/usagetruth` package runs `/usage`
+directly, per account, every pass:
 
 ```sh
 CLAUDE_CONFIG_DIR=<account's config dir> claude -p "/usage" --output-format json --no-session-persistence
@@ -352,9 +368,9 @@ CLAUDE_CONFIG_DIR=<account's config dir> claude -p "/usage" --output-format json
 
 This costs nothing to poll: `/usage` is answered locally by the CLI, never
 sent to the model — confirmed `total_cost_usd: 0`, all token counts `0`,
-~300ms. `CLAUDE_CONFIG_DIR` picks the account, the same directories
-`transcript-scan.mjs` already reads (see "More than one account"), so there is
-no separate account list to maintain.
+~300ms. `CLAUDE_CONFIG_DIR` picks the account, the same directories the
+transcript scan already reads (see "More than one account"), so there is no
+separate account list to maintain.
 
 It publishes one line per account to `{service_name="claude-code-usage-truth"}`:
 `session_pct`, `week_pct`, and the raw `session_reset_text`/`week_reset_text`
@@ -370,14 +386,9 @@ reset times — the ones this script actually uses — are the server-side,
 account-wide numbers that actually throttle you; the breakdown is not, and
 this script does not read it.
 
-**Then it closes the loop**: for a percentage that came back `> 0`, it reads
-that account's current `block_tokens`/`week_tokens` off the `claude-code-usage`
-stream and rewrites `account-limits.json`'s calibration — see "The limit
-references" above — and it parses the real reset weekday/hour into
-`week_start_day`/`week_start_hour` on that same entry, which `usage-meter.mjs`
-then uses instead of the global `WEEK_START_DAY`/`WEEK_START_HOUR` guess — see
-"The limit windows" above for why that mattered here: the code default
-(Monday) matched neither of the two real accounts tested against.
+That is the whole loop now — no calibration write-back, no week-boundary
+guess to correct. The two Overview gauges and the two "/usage says" panels
+below read this exact same published value; see "The limit windows" above.
 
 ## The panels
 
@@ -393,9 +404,9 @@ them.
 
 | Panel | What it decides |
 |-------|-----------------|
-| **5h block limit — % used** | How much of the current block is gone. If no block is open it reads zero — it does not carry over from the last one. |
-| **Weekly limit — % used** | How much of the weekly limit is gone since the reset. |
-| **5h — /usage says** | The same window's REAL percentage, straight from `/usage` (see `usage-truth.mjs` above) — compare against the derived gauge next to it with no unit conversion. |
+| **5h block limit — % used** | How much of the current block is gone, straight from `/usage` (see "usage-truth" above). If no block is open it reads zero — it does not carry over from the last one. |
+| **Weekly limit — % used** | How much of the weekly limit is gone since the reset, same source. |
+| **5h — /usage says** | The same number again, lower on the page next to the other `/usage`-sourced panels — kept as a second read-out rather than removed. |
 | **Weekly — /usage says** | Same, for the weekly window. |
 | **Cache reuse** | Share of input that came from cache you already paid for. |
 | **Tokens by model** (donut) | Where the consumption went. |
@@ -504,8 +515,8 @@ quietly spawned 30 subagents and started accelerating on its own. It says nothin
 about the limit; the gauges above do that.
 
 The curve is an **exponentially weighted moving average** with a 20-minute
-half-life (`RATE_HALFLIFE`), computed by `rate-meter.mjs` inside the collector and
-published into Loki, because LogQL has no EWMA.
+half-life (`RATE_HALFLIFE`), computed by dash-generator's `internal/ratemeter`
+package and published into Loki, because LogQL has no EWMA.
 
 It used to be `sum_over_time(tokens[15m]) * 4` computed directly in the panel.
 That is a boxcar, and on real data it behaved badly enough to make the panel
@@ -591,12 +602,13 @@ The input/output panel has cutlines **of its own per series**, computed only ove
 that series. Input and output differ by an order of magnitude, so using the
 total's cutline there would compare different things.
 
-Two things have to stay in sync here, and both have burned this dashboard before:
-`dashboard-generator.mjs` must read the same `RATE_HALFLIFE` as `transcript-scan.mjs`
-(hence one env var, in one format, read by both), and the cutlines must be quantiles of the
-curve actually drawn. An earlier version computed them over 1h windows while the
-graph drew 15min ones, which put the line at 782k under a curve whose real P75 was
-1.09M — a line that lies.
+The cutlines must be quantiles of the curve actually drawn — that has burned
+this dashboard before: an earlier version computed them over 1h windows while
+the graph drew 15min ones, which put the line at 782k under a curve whose real
+P75 was 1.09M — a line that lies. (An older version of this stack also had to
+keep `RATE_HALFLIFE` in sync across two separate scripts that both read it;
+dash-generator now reads it once and passes the same value to both the rate
+publisher and the dashboard generator, so that class of bug can't recur.)
 
 ### Time range
 
@@ -621,46 +633,47 @@ analysis window.
 
 ## The collector service
 
-`collector/collector.mjs` is a single Node process that runs everything Docker
-used to run as `transcript-exporter` and `dashboard-generator`: transcript
-scanning, rate-meter, usage-meter, usage-truth (all every `POLL_SECONDS`,
-default 60s) and dashboard generation (every `DASHBOARD_INTERVAL_SECONDS`,
+Two self-contained Go binaries run as host background services, not
+containers: `src/collector` (transcript scanning + usage-truth, every
+`POLL_SECONDS`, default 60s) and `src/dash-generator` (rate meter every
+`POLL_SECONDS`, dashboard generation every `DASHBOARD_INTERVAL_SECONDS`,
 default 600s — deliberately slower, see "Resource usage" below).
 
-It moved off Docker because it needs two things a `node:22-alpine` container
-doesn't have: the host's own logged-in `claude` CLI (for `usage-truth.mjs`),
-and the real Claude Code config directories at their real host paths (for
-`transcript-scan.mjs`) — no container mount replaces either.
+They run on the host, not in Docker, because the collector needs two things a
+container doesn't have: the host's own logged-in `claude` CLI (for
+`usage-truth`), and the real Claude Code config directories at their real host
+paths (for the transcript scan) — no container mount replaces either.
 
-**Configuration is plain environment variables, not a file** — set in your
-shell rc alongside the OTel telemetry vars (see "Enabling telemetry in every
-session"): `CLAUDE_DIR`, `CLAUDE_OBSERVABILITY_EXTRA_DIRS`, `EXPORTER_STREAM`,
-`RATE_HALFLIFE`, `POLL_SECONDS`, `DASHBOARD_INTERVAL_SECONDS`,
-`WEEK_START_DAY`/`WEEK_START_HOUR`, `TZ_OFFSET_HOURS`. Unset ones fall back to
-sensible built-in defaults. `launchd` runs neither a login nor an interactive
-shell, so it never sources your rc on its own —
-`bin/install-service.sh install`/`restart` resolves these once, at install
-time, by running your actual shell (`$SHELL -ic env`) and baking whatever it
-finds into the LaunchAgent's own environment.
+**Configuration is plain environment variables, not a file.** The wizard
+installs each as a native background service — `launchd` on macOS, `systemd
+--user` on Linux, a Scheduled Task on Windows — and bakes the vars it already
+collected (`CLAUDE_DIR`, `CLAUDE_OBSERVABILITY_EXTRA_DIRS`, `EXPORTER_STREAM`)
+directly into the service definition at install time, since none of the three
+service managers source your shell rc on their own. See "Enabling telemetry
+in every session" above for the full knob list and how to add one to an
+already-installed service by hand.
 
-Install it as a `launchd` LaunchAgent (this machine is macOS, which has no
-`systemd`):
+Re-run the wizard to reinstall (overwrites the existing service definition
+with fresh values — e.g. after editing your shell rc or moving a binary). To
+manage a service directly:
+
+| | macOS (`launchd`) | Linux (`systemd --user`) | Windows (Task Scheduler) |
+|---|---|---|---|
+| label/name | `com.claude-observability.collector` / `.dash-generator` | `claude-observability-collector.service` / `-dash-generator.service` | `ClaudeObservabilityCollector` / `ClaudeObservabilityDashGenerator` |
+| status | `launchctl list \| grep claude-observability` | `systemctl --user status <name>` | `schtasks /query /tn <name>` |
+| stop | `launchctl bootout gui/$UID <plist path>` | `systemctl --user stop <name>` | `schtasks /end /tn <name>` |
+| uninstall | stop, then `rm ~/Library/LaunchAgents/<label>.plist` | `systemctl --user disable --now <name>` then `rm ~/.config/systemd/user/<name>` | `schtasks /delete /tn <name> /f` |
+
+Logs land in `.state/collector.log` / `.err.log` and `.state/dash-generator.log`
+/ `.err.log`. By hand, for testing:
 
 ```sh
-bin/install-service.sh install     # write + load
-bin/install-service.sh status       # launchctl state + log tail
-bin/install-service.sh restart      # after editing your shell rc
-bin/install-service.sh uninstall
-```
+cd src/collector && go run ./cmd/collector --once      # one pass, then exit
+cd src/collector && go run ./cmd/collector --dry-run    # writes nothing to Loki — reads only
 
-Logs land in `.state/collector.log` (stdout) and
-`collector.err.log` (stderr). By hand, for testing:
-
-```sh
-cd collector
-node collector.mjs --once          # one pass of each loop, then exit
-node collector.mjs --dry-run       # writes nothing to Loki, account-limits.json,
-                                    # or the dashboards — reads only
+cd src/dash-generator && go run ./cmd/dash-generator --once
+cd src/dash-generator && go run ./cmd/dash-generator --dry-run  # writes nothing to Loki,
+                                                                  # account-limits.json, or the dashboards
 ```
 
 ## Stop / reset
@@ -668,8 +681,9 @@ node collector.mjs --dry-run       # writes nothing to Loki, account-limits.json
 ```sh
 docker compose down                          # stop grafana/loki/otel-collector, keep the data
 docker compose down -v                       # same, and wipe it
-bin/install-service.sh uninstall  # stop the collector
 ```
+
+Stop or uninstall the collector/dash-generator services using the table above.
 
 ## Known traps
 
@@ -714,28 +728,16 @@ curl -s -u admin:admin http://localhost:47300/api/dashboards/uid/cc-<slug> \
   | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d["meta"]["provisioned"], d["dashboard"]["version"])'
 ```
 
-**`launchd` runs neither a login nor an interactive shell, so it never sources
-your rc.** `collector.mjs`'s configuration and `usage-truth.mjs`'s `claude`
-spawn both depend on things only your shell rc sets up: `CLAUDE_DIR` and
-friends (see "The collector service"), and `PATH` having `node`/`claude` on
-it. `bin/install-service.sh` resolves both the same way — by running your
-*actual* shell as `$SHELL -ic env` at install time, so it sources the rc file
-your `export`/`set -gx` lines live in, and bakes whatever it finds directly
-into the LaunchAgent's `EnvironmentVariables` — and re-run `install` (or
-`restart`) after editing that rc, or after a Homebrew/nvm upgrade moves either
-binary, since none of that is watched for changes afterward.
-
-**`set -e` aborts a `var=$(fn)` assignment if `fn`'s LAST command happened to
-return false — even one wrapped in `[ ] &&`.** `install-service.sh`'s env-var
-resolution loop ends with `[ -n "$value" ] && printf ...` for each variable in
-turn; when the *last* one in the list isn't set (the common case —
-`TZ_OFFSET_HOURS` is usually left at its default), that final `[ -n "" ]`
-is false, the function's own exit status becomes 1, and
-`env_xml="$(collector_env_xml)"` — a plain assignment — killed the whole
-script under `set -euo pipefail`, silently, before the plist was ever written.
-Caught by testing the extraction logic standalone with a value deliberately
-missing. The fix is an explicit `return 0` at the end of the function, since
-its exit status was never meant to signal anything.
+**None of the three service managers source your shell rc.** The collector's
+`CLAUDE_DIR` and friends, and `claude` needing to be on `PATH` for
+`usage-truth`, only exist because your shell rc sets them up. The wizard
+avoids the old workaround of re-invoking your shell at install time
+(brittle — see the git history of this file for what that used to cost) by
+baking the vars it already collected directly into the service definition
+(the plist's `EnvironmentVariables`, the systemd unit's `Environment=` lines,
+or the Scheduled Task's `set VAR=value&&` prefix) at install time. Re-run the
+wizard after editing your shell rc or moving a binary — neither is watched
+for changes afterward.
 
 **An `instant` query breaks series names.** Loki returns `numeric-multi` frames
 for instant queries; Grafana merges those frames into one and renames the fields
@@ -754,24 +756,25 @@ The intervals are tuned for the data to be useful, not instantaneous:
 | Component | Interval | Why |
 |---|---|---|
 | Claude Code → OTel Collector | 60s (metrics), 30s (logs) | runs in EVERY session; was 10s/5s |
-| `collector.mjs` collection loop | 60s | transcript scan, rate-meter, usage-meter, usage-truth — all cheap |
-| `collector.mjs` dashboard loop | 600s | spawns 7–30 day Loki queries per account; does not need to be fresher |
+| `collector` poll loop | 60s | transcript scan, usage-truth — both cheap |
+| `dash-generator` rate loop | 60s | EWMA rate publish — cheap |
+| `dash-generator` dashboard loop | 600s | spawns 7–30 day Loki queries per account; does not need to be fresher |
 | Grafana re-provision | 300s | re-parses every dashboard on disk |
 | Loki compactor | 600s | the image's default |
 | Dashboard auto-refresh | 300s | each refresh fires ~14 Loki queries |
 
-The collection loop is 60s, not the 120s an earlier version used — a deliberate
-choice to keep transcripts, rate, usage, and the `/usage` ground truth fresh.
+The collector's poll loop is 60s, not the 120s an earlier version used — a
+deliberate choice to keep transcripts and the `/usage` ground truth fresh.
 The dashboard loop stayed at 600s on purpose rather than following it down:
 each pass spawns several 7-to-30-day Loki queries per account for numbers
 (P75, outlier fences, MCP/skill lists) that do not meaningfully change minute
 to minute — collapsing it to 60s too would be 10x the Loki load for no fresher
-information. One fewer periodic task since the pre-collector version, too:
-Prometheus (and its 60s scrape) was dropped entirely — it only ever existed to
-list accounts, which is now a Loki query (`discoverAccounts` in
-`collector/dashboard-generator.mjs`). Grafana also has unified alerting (which
-keeps a scheduler running even with zero rules), version checks and analytics
-turned off.
+information. One fewer periodic task since the pre-Go version, too: Prometheus
+(and its 60s scrape) was dropped entirely — it only ever existed to list
+accounts, which is now a Loki query (`discoverAccounts` in
+`src/dash-generator/internal/dashboardgen/dashboardgen.go`). Grafana also has
+unified alerting (which keeps a scheduler running even with zero rules),
+version checks and analytics turned off.
 
 At rest the stack sits around **700 MiB** with CPU near zero. If you need fresher
 data occasionally, raise the refresh in the Grafana tab rather than lowering these
@@ -787,9 +790,9 @@ intervals again.
   accounts had sent telemetry (via `label_values(user_email)`, cheap because
   `resource_to_telemetry_conversion` turned Claude Code's resource attributes
   into real Prometheus labels); that list now comes from a Loki query instead
-  (`discoverAccounts` in `collector/dashboard-generator.mjs`), following the
-  same pattern `rate-meter.mjs` already used to find every account with
-  telemetry. No panel ever read from Prometheus.
+  (`discoverAccounts` in `src/dash-generator/internal/dashboardgen/dashboardgen.go`),
+  following the same pattern the rate meter already used to find every account
+  with telemetry. No panel ever read from Prometheus.
 - `config/loki-config.yaml` deviates from the image's default in four places, all
   commented in the file: it accepts old samples (backfill), removes the query
   window cap, enables 90d retention, and raises `ingester.max_chunk_age` — without

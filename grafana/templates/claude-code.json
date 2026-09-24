@@ -183,7 +183,7 @@
             "uid": "loki"
           },
           "editorMode": "code",
-          "expr": "(vector(100) < (100 * sum(last_over_time({service_name=\"claude-code-usage\"} | user_email =~ `$account` | unwrap block_tokens [30m]) by (user_email)) / $limit_tokens_5h)) or (100 * sum(last_over_time({service_name=\"claude-code-usage\"} | user_email =~ `$account` | unwrap block_tokens [30m]) by (user_email)) / $limit_tokens_5h)",
+          "expr": "sum(last_over_time({service_name=\"claude-code-usage-truth\"} | user_email =~ `$account` | unwrap session_pct [30m]))",
           "queryType": "range",
           "hide": false,
           "legendFormat": "used"
@@ -256,7 +256,7 @@
             "uid": "loki"
           },
           "editorMode": "code",
-          "expr": "(vector(100) < (100 * sum(last_over_time({service_name=\"claude-code-usage\"} | user_email =~ `$account` | unwrap week_tokens [30m]) by (user_email)) / $limit_tokens_week)) or (100 * sum(last_over_time({service_name=\"claude-code-usage\"} | user_email =~ `$account` | unwrap week_tokens [30m]) by (user_email)) / $limit_tokens_week)",
+          "expr": "sum(last_over_time({service_name=\"claude-code-usage-truth\"} | user_email =~ `$account` | unwrap week_pct [30m]))",
           "queryType": "range",
           "hide": false,
           "legendFormat": "used"

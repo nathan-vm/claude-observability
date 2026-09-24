@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"claude-observability-setup/internal/envwriter"
+	"claude-observability-wizard/internal/envwriter"
 )
 
 func TestGenerateUnit_ContainsExecAndEnv(t *testing.T) {

@@ -9,12 +9,12 @@ import (
 	"runtime"
 	"time"
 
-	"claude-observability-setup/internal/discovery"
-	"claude-observability-setup/internal/envwriter"
-	"claude-observability-setup/internal/health"
-	"claude-observability-setup/internal/limits"
-	"claude-observability-setup/internal/service"
-	"claude-observability-setup/internal/wizard"
+	"claude-observability-wizard/internal/discovery"
+	"claude-observability-wizard/internal/envwriter"
+	"claude-observability-wizard/internal/health"
+	"claude-observability-wizard/internal/limits"
+	"claude-observability-wizard/internal/service"
+	"claude-observability-wizard/internal/wizard"
 )
 
 func main() {
@@ -206,7 +206,7 @@ func installService(repoRoot string, collectorVars []envwriter.Var) error {
 
 // findDashGeneratorBinary looks for a dash-generator binary built
 // alongside this one (same directory as the running setup executable) or
-// on PATH — it isn't bundled inside claude-observability-setup itself.
+// on PATH — it isn't bundled inside claude-observability-wizard itself.
 func findDashGeneratorBinary(repoRoot string) (string, error) {
 	name := "dash-generator"
 	if runtime.GOOS == "windows" {
@@ -221,13 +221,13 @@ func findDashGeneratorBinary(repoRoot string) (string, error) {
 	if path, err := exec.LookPath(name); err == nil {
 		return path, nil
 	}
-	return "", fmt.Errorf("%s not found next to this binary or on PATH — build it from dash-generator/ or download it alongside claude-observability-setup", name)
+	return "", fmt.Errorf("%s not found next to this binary or on PATH — build it from dash-generator/ or download it alongside claude-observability-wizard", name)
 }
 
 func dashGeneratorLabel() string {
 	switch runtime.GOOS {
 	case "darwin":
-		return "com.agents-observability.dash-generator"
+		return "com.claude-observability.dash-generator"
 	case "windows":
 		return "ClaudeObservabilityDashGenerator"
 	default:
@@ -266,13 +266,13 @@ func findCollectorBinary(repoRoot string) (string, error) {
 	if path, err := exec.LookPath(name); err == nil {
 		return path, nil
 	}
-	return "", fmt.Errorf("%s not found next to this binary or on PATH — build it from collector/ or download it alongside claude-observability-setup", name)
+	return "", fmt.Errorf("%s not found next to this binary or on PATH — build it from collector/ or download it alongside claude-observability-wizard", name)
 }
 
 func collectorLabel() string {
 	switch runtime.GOOS {
 	case "darwin":
-		return "com.agents-observability.collector"
+		return "com.claude-observability.collector"
 	case "windows":
 		return "ClaudeObservabilityCollector"
 	default:

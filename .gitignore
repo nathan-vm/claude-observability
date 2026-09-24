@@ -1,12 +1,12 @@
 # Tudo abaixo é específico desta máquina: contém emails ou é derivado. Cada
 # entrada tem um modelo versionado ao lado, quando aplicável.
 
-# Dashboards gerados por collector/dashboard-generator.mjs, um por conta.
+# Dashboards gerados por src/dash-generator, um por conta.
 # Derivados do template e nomeados pelo email.
 grafana/dashboards/accounts/
 
-# Limites por conta e lista de contas ignoradas — contém emails. Recalibrado
-# automaticamente pelo collector (usage-truth.mjs).
+# Limites por conta e lista de contas ignoradas — contém emails. Editado à
+# mão (sem mais recalibração automática — ver README.md, "The limit references").
 # Modelo: grafana/account-limits.example.json
 grafana/account-limits.json
 
@@ -17,12 +17,18 @@ grafana/account-limits.json
 # Git worktrees (local dev convenience, not part of the repo).
 .worktrees/
 
+# Scratch workspace for verifying the Go collector/dash-generator port
+# against the isolated loki-verify/grafana-verify pair in docker-compose.yaml
+# — contains generated dashboards with real emails, same rule as
+# grafana/dashboards/accounts/ above.
+.verify-grafana/
+
 # Stray binaries from a plain `go build ./...` run inside a module root
 # (no -o given) — named after the cmd/ subdirectory, e.g. `go build ./...`
-# from setup/ produces setup/setup.
-/setup/setup
-/setup/setup.exe
-/dash-generator/dash-generator
-/dash-generator/dash-generator.exe
-/collector/collector
-/collector/collector.exe
+# from src/wizard/ produces src/wizard/wizard.
+/src/wizard/wizard
+/src/wizard/wizard.exe
+/src/dash-generator/dash-generator
+/src/dash-generator/dash-generator.exe
+/src/collector/collector
+/src/collector/collector.exe

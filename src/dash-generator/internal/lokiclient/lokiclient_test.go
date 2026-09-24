@@ -8,6 +8,10 @@ import (
 )
 
 func TestQuery_ParsesInstantResult(t *testing.T) {
+	// Timestamp is an UNQUOTED JSON number here, matching what real Loki
+	// actually sends for a metric (vector) result — confirmed against a
+	// live instance; a quoted-string fixture would mask the real decode
+	// bug this once had (json: cannot unmarshal number into ... string).
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/loki/api/v1/query" {
 			t.Errorf("path = %s, want /loki/api/v1/query", r.URL.Path)
@@ -16,7 +20,7 @@ func TestQuery_ParsesInstantResult(t *testing.T) {
 			t.Errorf("query param = %q, want up", r.URL.Query().Get("query"))
 		}
 		w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[
-			{"metric":{"user_email":"a@example.com"},"value":["1700000000","42"]}
+			{"metric":{"user_email":"a@example.com"},"value":[1700000000,"42"]}
 		]}}`))
 	}))
 	defer srv.Close()
@@ -30,6 +34,26 @@ func TestQuery_ParsesInstantResult(t *testing.T) {
 	}
 	if series[0].Metric["user_email"] != "a@example.com" {
 		t.Errorf("metric = %v", series[0].Metric)
+	}
+	if series[0].Values[0] != [2]string{"1700000000", "42"} {
+		t.Errorf("values = %v", series[0].Values)
+	}
+}
+
+func TestQuery_AlsoAcceptsQuotedTimestamp(t *testing.T) {
+	// Loki's own log-query ("streams") API quotes its timestamps, unlike
+	// the metric API Query/QueryRange actually call — accept either form
+	// robustly rather than assuming one.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[
+			{"metric":{},"value":["1700000000","42"]}
+		]}}`))
+	}))
+	defer srv.Close()
+
+	series, err := Query(srv.URL, "up", 1700000000)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if series[0].Values[0] != [2]string{"1700000000", "42"} {
 		t.Errorf("values = %v", series[0].Values)
@@ -70,7 +94,7 @@ func TestQueryRange_ParsesMatrixResult(t *testing.T) {
 			}
 		}
 		w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[
-			{"metric":{},"values":[["1700000000","1"],["1700000300","2"]]}
+			{"metric":{},"values":[[1700000000,"1"],[1700000300,"2"]]}
 		]}}`))
 	}))
 	defer srv.Close()

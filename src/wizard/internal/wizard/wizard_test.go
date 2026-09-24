@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"claude-observability-setup/internal/discovery"
+	"claude-observability-wizard/internal/discovery"
 )
 
 func TestAskLine_EmptyReturnsDefault(t *testing.T) {

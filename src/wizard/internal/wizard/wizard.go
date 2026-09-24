@@ -8,7 +8,7 @@ import (
 	"io"
 	"strings"
 
-	"claude-observability-setup/internal/discovery"
+	"claude-observability-wizard/internal/discovery"
 )
 
 // AskLine prints "label [def]: " to w, reads one line from r, and returns
