@@ -14,8 +14,8 @@ services:
     volumes:
       - ./config/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
     ports:
-      - "127.0.0.1:47317:4317"   # OTLP gRPC  (uncommon host port)
-      - "127.0.0.1:47318:4318"   # OTLP HTTP  (uncommon host port)
+      - "127.0.0.1:${OTEL_GRPC_PORT:-47317}:4317"   # OTLP gRPC  (uncommon host port)
+      - "127.0.0.1:${OTEL_HTTP_PORT:-47318}:4318"   # OTLP HTTP  (uncommon host port)
     depends_on:
       - loki
     restart: unless-stopped
@@ -31,7 +31,7 @@ services:
     image: grafana/loki:latest
     command: ["-config.file=/etc/loki/loki-config.yaml"]
     ports:
-      - "127.0.0.1:47100:3100"
+      - "127.0.0.1:${LOKI_PORT:-47100}:3100"
     volumes:
       - ./config/loki-config.yaml:/etc/loki/loki-config.yaml:ro
       - loki-data:/loki
@@ -62,7 +62,7 @@ services:
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     ports:
-      - "127.0.0.1:47300:3000"
+      - "127.0.0.1:${GRAFANA_PORT:-47300}:3000"
     depends_on:
       - loki
     restart: unless-stopped
