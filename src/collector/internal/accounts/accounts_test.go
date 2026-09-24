@@ -1,9 +1,18 @@
 package accounts
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+// sep is the extra-dirs list separator the tests build fixtures with —
+// os.PathListSeparator, same as ResolveConfigDirs itself splits on
+// (":" on POSIX, ";" on Windows). A hardcoded ":" here would silently
+// stop exercising the split on Windows once the production code moved
+// off a hardcoded ":" too.
+var sep = string(os.PathListSeparator)
 
 func TestResolveConfigDirs_DefaultsToHomeClaudeWhenUnset(t *testing.T) {
 	got := ResolveConfigDirs("/home/nathan", "", "")
@@ -26,7 +35,8 @@ func TestResolveConfigDirs_ExpandsHomeVarInClaudeDir(t *testing.T) {
 }
 
 func TestResolveConfigDirs_ExpandsBareDollarHomeInExtraDirs(t *testing.T) {
-	got := ResolveConfigDirs("/home/nathan", "/home/nathan/.claude", "$HOME/.claude-work:$HOME/.claude-personal")
+	extraDirs := strings.Join([]string{"$HOME/.claude-work", "$HOME/.claude-personal"}, sep)
+	got := ResolveConfigDirs("/home/nathan", "/home/nathan/.claude", extraDirs)
 	want := []string{"/home/nathan/.claude", "/home/nathan/.claude-work", "/home/nathan/.claude-personal"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
@@ -39,7 +49,8 @@ func TestResolveConfigDirs_ExpandsBareDollarHomeInExtraDirs(t *testing.T) {
 }
 
 func TestResolveConfigDirs_PrimaryFirstAndDeduped(t *testing.T) {
-	got := ResolveConfigDirs("/home/nathan", "/home/nathan/.claude", "/home/nathan/.claude: :/home/nathan/.claude-work")
+	extraDirs := strings.Join([]string{"/home/nathan/.claude", " ", "/home/nathan/.claude-work"}, sep)
+	got := ResolveConfigDirs("/home/nathan", "/home/nathan/.claude", extraDirs)
 	want := []string{"/home/nathan/.claude", "/home/nathan/.claude-work"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
