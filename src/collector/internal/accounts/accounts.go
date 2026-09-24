@@ -3,6 +3,7 @@
 package accounts
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -14,9 +15,9 @@ func expandHome(value, homeDir string) string {
 }
 
 // ResolveConfigDirs returns every Claude Code config directory to scan:
-// claudeDirEnv (default "<homeDir>/.claude") plus the colon-separated
-// extraDirsEnv, each with "${HOME}"/"$HOME" expanded, deduplicated,
-// primary first.
+// claudeDirEnv (default "<homeDir>/.claude") plus extraDirsEnv split on
+// os.PathListSeparator — ":" on POSIX, ";" on Windows, same as $PATH —
+// each with "${HOME}"/"$HOME" expanded, deduplicated, primary first.
 func ResolveConfigDirs(homeDir, claudeDirEnv, extraDirsEnv string) []string {
 	primary := claudeDirEnv
 	if primary == "" {
@@ -27,7 +28,7 @@ func ResolveConfigDirs(homeDir, claudeDirEnv, extraDirsEnv string) []string {
 
 	seen := map[string]bool{primary: true}
 	out := []string{primary}
-	for _, d := range strings.Split(extraDirsEnv, ":") {
+	for _, d := range strings.Split(extraDirsEnv, string(os.PathListSeparator)) {
 		d = strings.TrimSpace(d)
 		if d == "" {
 			continue
