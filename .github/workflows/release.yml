@@ -1,9 +1,63 @@
 name: release
 on:
   push:
-    tags: ['v*']
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
 jobs:
+  compute-version:
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.compute.outputs.version }}
+      bumped: ${{ steps.compute.outputs.bumped }}
+      changelog: ${{ steps.compute.outputs.changelog }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Compute next version, update changelog, tag
+        id: compute
+        run: |
+          output="$(.github/scripts/compute-next-version.sh /tmp/changelog-fragment.md)"
+          echo "$output" >> "$GITHUB_OUTPUT"
+          version=$(echo "$output" | grep '^version=' | cut -d= -f2)
+          bumped=$(echo "$output" | grep '^bumped=' | cut -d= -f2)
+
+          if [ "$bumped" = "true" ]; then
+            {
+              echo "# Changelog"
+              echo
+              cat /tmp/changelog-fragment.md
+              tail -n +3 CHANGELOG.md
+            } > /tmp/CHANGELOG.new
+            mv /tmp/CHANGELOG.new CHANGELOG.md
+
+            git add CHANGELOG.md
+            git commit -m "docs(changelog): v${version} [skip ci]"
+            git tag -a "v${version}" -m "Release v${version}"
+            git push origin main --follow-tags
+
+            echo "changelog<<CHANGELOG_EOF" >> "$GITHUB_OUTPUT"
+            cat /tmp/changelog-fragment.md >> "$GITHUB_OUTPUT"
+            echo "CHANGELOG_EOF" >> "$GITHUB_OUTPUT"
+          fi
+
   wizard:
+    needs: compute-version
+    if: needs.compute-version.outputs.bumped == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -32,13 +86,15 @@ jobs:
         run: |
           ext=""
           if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
-          go build -o "claude-observability-wizard-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" ./cmd/wizard
+          go build -ldflags "-X main.version=${{ needs.compute-version.outputs.version }}" -o "claude-observability-wizard-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" ./cmd/wizard
       - uses: actions/upload-artifact@v4
         with:
           name: binaries-wizard-${{ matrix.goos }}-${{ matrix.goarch }}
           path: src/wizard/claude-observability-wizard-*
 
   dash-generator:
+    needs: compute-version
+    if: needs.compute-version.outputs.bumped == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -67,13 +123,15 @@ jobs:
         run: |
           ext=""
           if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
-          go build -o "claude-observability-dash-generator-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" ./cmd/dash-generator
+          go build -ldflags "-X main.version=${{ needs.compute-version.outputs.version }}" -o "claude-observability-dash-generator-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" ./cmd/dash-generator
       - uses: actions/upload-artifact@v4
         with:
           name: binaries-dash-generator-${{ matrix.goos }}-${{ matrix.goarch }}
           path: src/dash-generator/claude-observability-dash-generator-*
 
   collector:
+    needs: compute-version
+    if: needs.compute-version.outputs.bumped == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -102,14 +160,15 @@ jobs:
         run: |
           ext=""
           if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
-          go build -o "claude-observability-collector-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" ./cmd/collector
+          go build -ldflags "-X main.version=${{ needs.compute-version.outputs.version }}" -o "claude-observability-collector-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" ./cmd/collector
       - uses: actions/upload-artifact@v4
         with:
           name: binaries-collector-${{ matrix.goos }}-${{ matrix.goarch }}
           path: src/collector/claude-observability-collector-*
 
   release:
-    needs: [wizard, dash-generator, collector]
+    needs: [compute-version, wizard, dash-generator, collector]
+    if: needs.compute-version.outputs.bumped == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -118,4 +177,6 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ needs.compute-version.outputs.version }}
+          body: ${{ needs.compute-version.outputs.changelog }}
           files: dist/*
