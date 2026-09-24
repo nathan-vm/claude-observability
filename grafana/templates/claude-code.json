@@ -183,7 +183,7 @@
             "uid": "loki"
           },
           "editorMode": "code",
-          "expr": "sum(last_over_time({service_name=\"claude-code-usage-truth\"} | user_email =~ `$account` | unwrap session_pct [30m]))",
+          "expr": "sum(last_over_time({service_name=\"claude-code-usage-truth\"} | user_email =~ `$account` | unwrap session_pct [30m]) by (user_email))",
           "queryType": "range",
           "hide": false,
           "legendFormat": "used"
@@ -256,7 +256,7 @@
             "uid": "loki"
           },
           "editorMode": "code",
-          "expr": "sum(last_over_time({service_name=\"claude-code-usage-truth\"} | user_email =~ `$account` | unwrap week_pct [30m]))",
+          "expr": "sum(last_over_time({service_name=\"claude-code-usage-truth\"} | user_email =~ `$account` | unwrap week_pct [30m]) by (user_email))",
           "queryType": "range",
           "hide": false,
           "legendFormat": "used"
@@ -464,7 +464,7 @@
             "uid": "loki"
           },
           "editorMode": "code",
-          "expr": "sum(last_over_time({service_name=\"claude-code-usage-truth\"} | user_email =~ `$account` | unwrap session_pct [30m]))",
+          "expr": "sum(last_over_time({service_name=\"claude-code-usage-truth\"} | user_email =~ `$account` | unwrap session_pct [30m]) by (user_email))",
           "queryType": "range",
           "hide": false
         }
@@ -529,7 +529,7 @@
             "uid": "loki"
           },
           "editorMode": "code",
-          "expr": "sum(last_over_time({service_name=\"claude-code-usage-truth\"} | user_email =~ `$account` | unwrap week_pct [30m]))",
+          "expr": "sum(last_over_time({service_name=\"claude-code-usage-truth\"} | user_email =~ `$account` | unwrap week_pct [30m]) by (user_email))",
           "queryType": "range",
           "hide": false
         }

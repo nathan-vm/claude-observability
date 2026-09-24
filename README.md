@@ -102,7 +102,7 @@ environment variable, unset ones falling back to sensible built-in defaults
 | Var | Read by | Default |
 |---|---|---|
 | `CLAUDE_DIR`, `CLAUDE_OBSERVABILITY_EXTRA_DIRS` | collector | first discovered account dir |
-| `EXPORTER_STREAM` | collector (shell rc), dash-generator (docker-compose.yaml) | `claude-code-exporter-1` |
+| `EXPORTER_STREAM` | collector (shell rc), dash-generator (docker-compose.yaml, substituted from your shell) | `claude-code-exporter-1` |
 | `LOKI_URL` | collector (shell rc), dash-generator (docker-compose.yaml) | `http://localhost:47100` / `http://loki:3100` in-container |
 | `POLL_SECONDS` | collector, dash-generator (rate loop) | `60` |
 | `DEDUP_DAYS`, `BATCH_SIZE`, `ORPHAN_AFTER_MS`, `EMAIL_LOOKBACK_HOURS`, `STATE_FILE` | collector | see `src/collector/cmd/collector/main.go` |
@@ -116,8 +116,12 @@ them to the installed service file directly (see "The collector service"
 below) if you want the background service to pick one up, since
 `launchd`/`systemd`/Task Scheduler do not source your shell rc on their own —
 only the vars the wizard explicitly baked in at install time are there. For
-dash-generator, set them as `environment:` entries on its docker-compose.yaml
-service instead and `docker compose up -d dash-generator` to apply.
+dash-generator, `EXPORTER_STREAM` reads from your shell when you run `docker
+compose up` (docker-compose.yaml substitutes it, falling back to the same
+default if unset) — export it there instead of editing the file. The other
+dash-generator knobs aren't shared with anything host-side, so those stay
+plain `environment:` entries on its docker-compose.yaml service; edit the
+file and `docker compose up -d dash-generator` to apply.
 
 ## One dashboard per account — and nothing else
 
@@ -342,9 +346,10 @@ cd src/collector && go run ./cmd/collector --rescan --once
 tokens are attributed), bump the stream generation — the single source both
 the collector and dash-generator read. Edit `EXPORTER_STREAM` in your shell rc
 and re-run the wizard to reinstall the collector service with the new value
-(see "The collector service"); edit it in docker-compose.yaml's
-`dash-generator` service and `docker compose up -d dash-generator` to apply
-it there. Then drop the state:
+(see "The collector service"); docker-compose.yaml's `dash-generator` service
+reads the same variable from your shell (`${EXPORTER_STREAM:-claude-code-exporter-1}`),
+so exporting it before `docker compose up -d dash-generator` is enough —
+no need to hand-edit the compose file too. Then drop the state:
 
 ```sh
 rm -rf .state                                          # collector's state

@@ -78,7 +78,7 @@ services:
       context: ./src/dash-generator
     environment:
       - LOKI_URL=http://loki:3100
-      - EXPORTER_STREAM=claude-code-exporter-1
+      - EXPORTER_STREAM=${EXPORTER_STREAM:-claude-code-exporter-1}
       - GRAFANA_DIR=/app/grafana
       - STATE_FILE=/app/.state/dash-generator-state.json
     volumes:
