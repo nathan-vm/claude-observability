@@ -16,4 +16,9 @@ type Config struct {
 	WorkingDir string
 	Env        []envwriter.Var
 	LogDir     string // absolute path for stdout/stderr logs
+	// ExtraPathDirs, if set, is prepended to the service's PATH (darwin and
+	// linux only) ahead of the standard OS bin dirs — for a program the
+	// service needs on PATH that doesn't live in one of those (e.g. `claude`
+	// installed via Homebrew on Apple Silicon, or nvm).
+	ExtraPathDirs string
 }

@@ -8,11 +8,15 @@ repo's only concern is getting telemetry flowing somewhere and turning it into
 dashboards; today "somewhere" is always localhost, this repo's own stack.
 
 Path: Claude Code → OTel Collector → Loki (logs) → Grafana. In parallel, two
-self-contained Go binaries run as host processes (not containers — see "The
-collector service" below): the **collector** reads the local transcripts and
-runs the `claude` CLI to publish what OTel alone doesn't give you — the real
-MCP and skill names, and the real `/usage` numbers — and **dash-generator**
-publishes the consumption-rate series and generates each account's dashboard.
+self-contained Go binaries do the rest — see "The collector service" below
+for why the split isn't arbitrary: the **collector** is a host process (not a
+container) that reads the local transcripts and runs the `claude` CLI to
+publish what OTel alone doesn't give you — the real MCP and skill names, and
+the real `/usage` numbers. **dash-generator** publishes the consumption-rate
+series and generates each account's dashboard, and runs in Docker, alongside
+Loki and Grafana — it stands in for what would, centrally, be "the server":
+a real deployment has every user's machine sending OTel only, with dashboard
+generation happening once, centrally, not per laptop.
 
 ## Services
 
@@ -21,23 +25,24 @@ publishes the consumption-rate series and generates each account's dashboard.
 | OTel Collector   | `localhost:47317` (gRPC), `localhost:47318` (HTTP) | single OTLP ingest endpoint |
 | Grafana          | http://localhost:47300                             | dashboards (anonymous Viewer, `admin`/`admin` to edit) |
 | Loki             | http://localhost:47100                             | logs and events, 90d retention |
+| dash-generator   | — (Docker, internal only)                          | rate meter, per-account dashboard generation — stands in for "the server" |
 | collector        | — (host process, not Docker)                       | real tool/skill names, `/usage` ground truth |
-| dash-generator   | — (host process, not Docker)                       | rate meter, per-account dashboard generation |
 
 ## Getting started
 
-Bring the stack up yourself first — the wizard never does this for you:
+Bring the stack up yourself first — the wizard never does this for you. This
+also builds and starts dash-generator (Docker, standing in for "the server"):
 
 ```sh
-docker compose up -d               # otel-collector + loki + grafana
+docker compose up -d               # otel-collector + loki + grafana + dash-generator
 ```
 
-Then download the `claude-observability-wizard`, `dash-generator`, and
-`collector` binaries for your OS/arch from this repo's
-[Releases page](../../releases) (or build them yourself: `cd src/wizard &&
-go build ./cmd/wizard`, `cd src/dash-generator && go build ./cmd/dash-generator`,
-`cd src/collector && go build ./cmd/collector` — put all three in the same
-directory), and run the wizard from the repo root:
+Then download the `claude-observability-wizard` and
+`claude-observability-collector` binaries for your OS/arch from this repo's
+[Releases page](../../releases) (or build them yourself: `cd src/wizard && go
+build -o claude-observability-wizard ./cmd/wizard`, `cd src/collector && go
+build -o claude-observability-collector ./cmd/collector` — put both in the
+same directory), and run the wizard from the repo root:
 
 ```sh
 ./claude-observability-wizard
@@ -48,9 +53,9 @@ identifies the account behind each one, asks which ones you want to monitor,
 asks for the OTel endpoint and an optional token (prefilled with the local
 defaults — edit them if you're running docker on different ports), checks
 that the endpoint is actually reachable before writing anything, enables
-telemetry in the right shell/OS, and offers to install dash-generator and the
-collector as background services. No Node, Python, or other runtime needed to
-run any of the three — just the OS itself (Windows included).
+telemetry in the right shell/OS, and offers to install the collector as a
+background service. No Node, Python, or other runtime needed to run either
+binary — just the OS itself (Windows included).
 
 ### More than one account
 
@@ -97,30 +102,32 @@ environment variable, unset ones falling back to sensible built-in defaults
 | Var | Read by | Default |
 |---|---|---|
 | `CLAUDE_DIR`, `CLAUDE_OBSERVABILITY_EXTRA_DIRS` | collector | first discovered account dir |
-| `EXPORTER_STREAM` | collector, dash-generator | `claude-code-exporter-1` |
-| `LOKI_URL` | collector, dash-generator | `http://localhost:47100` |
+| `EXPORTER_STREAM` | collector (shell rc), dash-generator (docker-compose.yaml) | `claude-code-exporter-1` |
+| `LOKI_URL` | collector (shell rc), dash-generator (docker-compose.yaml) | `http://localhost:47100` / `http://loki:3100` in-container |
 | `POLL_SECONDS` | collector, dash-generator (rate loop) | `60` |
 | `DEDUP_DAYS`, `BATCH_SIZE`, `ORPHAN_AFTER_MS`, `EMAIL_LOOKBACK_HOURS`, `STATE_FILE` | collector | see `src/collector/cmd/collector/main.go` |
 | `RATE_HALFLIFE`, `RATE_BACKFILL_DAYS`, `DASHBOARD_INTERVAL_SECONDS` | dash-generator | `20m`, `14`, `600` |
 
 The wizard's shell-rc block only carries `CLAUDE_DIR`,
 `CLAUDE_OBSERVABILITY_EXTRA_DIRS` and `EXPORTER_STREAM` — the ones it actually
-asks about. The rest are power-user knobs: set them in your shell before
-running a binary by hand, or add them to the installed service file directly
-(see "The collector service" below) if you want a background service to pick
-one up, since `launchd`/`systemd`/Task Scheduler do not source your shell rc
-on their own — only the vars the wizard explicitly baked into the service at
-install time are there.
+asks about, and only for the **collector**. The rest are power-user knobs:
+for the collector, set them in your shell before running it by hand, or add
+them to the installed service file directly (see "The collector service"
+below) if you want the background service to pick one up, since
+`launchd`/`systemd`/Task Scheduler do not source your shell rc on their own —
+only the vars the wizard explicitly baked in at install time are there. For
+dash-generator, set them as `environment:` entries on its docker-compose.yaml
+service instead and `docker compose up -d dash-generator` to apply.
 
 ## One dashboard per account — and nothing else
 
 There is no "all accounts" dashboard. Each account has its own MCP servers,
 plugins and configuration, and the numbers do not add up into anything useful.
 
-`src/dash-generator` runs its dashboard-generation loop on its own
-`DASHBOARD_INTERVAL_SECONDS` cadence (default 10 minutes — see "The collector
-service"). The first time a new account sends data, its dashboard shows up as
-**"Claude Code — <email>"**.
+`src/dash-generator` (the `dash-generator` Docker service) runs its
+dashboard-generation loop on its own `DASHBOARD_INTERVAL_SECONDS` cadence
+(default 10 minutes — see "The collector service"). The first time a new
+account sends data, its dashboard shows up as **"Claude Code — <email>"**.
 
 The single source is `grafana/templates/claude-code.json`. It deliberately sits
 **outside** `grafana/dashboards/`: that is the provisioned directory, and a
@@ -132,7 +139,8 @@ generator reads the template and swaps what is account-specific:
 - injects **that account's limit references** (see below);
 - fills the MCP server and skill owner filters with what the account actually used.
 
-Run it by hand: `cd src/dash-generator && go run ./cmd/dash-generator --once`.
+Trigger a pass outside its normal 10-minute cadence:
+`docker compose exec dash-generator claude-observability-dash-generator --once`.
 Accounts that disappear from the data have their file removed on the next
 run. The generated files contain emails, are specific to this machine, and
 are gitignored.
@@ -331,14 +339,17 @@ cd src/collector && go run ./cmd/collector --rescan --once
 ```
 
 **Reimport**: to redo the whole derivation (say, after changing how accounts or
-tokens are attributed), bump the stream generation — edit `EXPORTER_STREAM` in
-your shell rc, the single source both the collector and dash-generator read,
-then open a new terminal (or `source` it) and restart both services so they
-pick up the new value (see "The collector service" for the per-OS restart
-commands). Then drop the state:
+tokens are attributed), bump the stream generation — the single source both
+the collector and dash-generator read. Edit `EXPORTER_STREAM` in your shell rc
+and re-run the wizard to reinstall the collector service with the new value
+(see "The collector service"); edit it in docker-compose.yaml's
+`dash-generator` service and `docker compose up -d dash-generator` to apply
+it there. Then drop the state:
 
 ```sh
-rm -rf .state
+rm -rf .state                                          # collector's state
+docker compose down -v dash-generator                  # dash-generator's state
+docker compose up -d dash-generator
 ```
 
 The old generation is orphaned and ages out with the 90-day retention.
@@ -633,57 +644,58 @@ analysis window.
 
 ## The collector service
 
-Two self-contained Go binaries run as host background services, not
-containers: `src/collector` (transcript scanning + usage-truth, every
-`POLL_SECONDS`, default 60s) and `src/dash-generator` (rate meter every
-`POLL_SECONDS`, dashboard generation every `DASHBOARD_INTERVAL_SECONDS`,
-default 600s — deliberately slower, see "Resource usage" below).
-
-They run on the host, not in Docker, because the collector needs two things a
-container doesn't have: the host's own logged-in `claude` CLI (for
-`usage-truth`), and the real Claude Code config directories at their real host
-paths (for the transcript scan) — no container mount replaces either.
+`src/collector` (transcript scanning + usage-truth, every `POLL_SECONDS`,
+default 60s) is the one piece of this stack that runs as a host background
+service, not a container. It needs two things a container doesn't have: the
+host's own logged-in `claude` CLI (for `usage-truth`), and the real Claude
+Code config directories at their real host paths (for the transcript scan) —
+no container mount replaces either. (dash-generator has no such requirement —
+it only talks to Loki — so it runs in Docker; see "Services" above.)
 
 **Configuration is plain environment variables, not a file.** The wizard
-installs each as a native background service — `launchd` on macOS, `systemd
+installs it as a native background service — `launchd` on macOS, `systemd
 --user` on Linux, a Scheduled Task on Windows — and bakes the vars it already
-collected (`CLAUDE_DIR`, `CLAUDE_OBSERVABILITY_EXTRA_DIRS`, `EXPORTER_STREAM`)
-directly into the service definition at install time, since none of the three
-service managers source your shell rc on their own. See "Enabling telemetry
-in every session" above for the full knob list and how to add one to an
-already-installed service by hand.
+collected (`CLAUDE_DIR`, `CLAUDE_OBSERVABILITY_EXTRA_DIRS`, `EXPORTER_STREAM`,
+and the directory of `claude` on the wizard's own `PATH`) directly into the
+service definition at install time, since none of the three service managers
+source your shell rc on their own. See "Enabling telemetry in every session"
+above for the full knob list and how to add one to an already-installed
+service by hand.
 
 Re-run the wizard to reinstall (overwrites the existing service definition
-with fresh values — e.g. after editing your shell rc or moving a binary). To
-manage a service directly:
+with fresh values — e.g. after editing your shell rc, moving the `claude-
+observability-collector` binary, or `claude` itself moving — a Homebrew/nvm
+upgrade, say). To manage the service directly:
 
 | | macOS (`launchd`) | Linux (`systemd --user`) | Windows (Task Scheduler) |
 |---|---|---|---|
-| label/name | `com.claude-observability.collector` / `.dash-generator` | `claude-observability-collector.service` / `-dash-generator.service` | `ClaudeObservabilityCollector` / `ClaudeObservabilityDashGenerator` |
+| label/name | `com.claude-observability.collector` | `claude-observability-collector.service` | `ClaudeObservabilityCollector` |
 | status | `launchctl list \| grep claude-observability` | `systemctl --user status <name>` | `schtasks /query /tn <name>` |
 | stop | `launchctl bootout gui/$UID <plist path>` | `systemctl --user stop <name>` | `schtasks /end /tn <name>` |
 | uninstall | stop, then `rm ~/Library/LaunchAgents/<label>.plist` | `systemctl --user disable --now <name>` then `rm ~/.config/systemd/user/<name>` | `schtasks /delete /tn <name> /f` |
 
-Logs land in `.state/collector.log` / `.err.log` and `.state/dash-generator.log`
-/ `.err.log`. By hand, for testing:
+Logs land in `.state/claude-observability-collector.log` / `.err.log`. By
+hand, for testing:
 
 ```sh
-cd src/collector && go run ./cmd/collector --once      # one pass, then exit
-cd src/collector && go run ./cmd/collector --dry-run    # writes nothing to Loki — reads only
-
-cd src/dash-generator && go run ./cmd/dash-generator --once
-cd src/dash-generator && go run ./cmd/dash-generator --dry-run  # writes nothing to Loki,
-                                                                  # account-limits.json, or the dashboards
+cd src/collector
+go run ./cmd/collector --once      # one pass, then exit
+go run ./cmd/collector --dry-run   # writes nothing to Loki — reads only
 ```
+
+dash-generator's equivalents, since it runs in Docker: `docker compose logs
+-f dash-generator`; trigger a pass by hand with `docker compose exec
+dash-generator claude-observability-dash-generator --once` (`--dry-run` works
+the same way).
 
 ## Stop / reset
 
 ```sh
-docker compose down                          # stop grafana/loki/otel-collector, keep the data
+docker compose down                          # stop grafana/loki/otel-collector/dash-generator, keep the data
 docker compose down -v                       # same, and wipe it
 ```
 
-Stop or uninstall the collector/dash-generator services using the table above.
+Stop or uninstall the collector service using the table above.
 
 ## Known traps
 
@@ -756,9 +768,9 @@ The intervals are tuned for the data to be useful, not instantaneous:
 | Component | Interval | Why |
 |---|---|---|
 | Claude Code → OTel Collector | 60s (metrics), 30s (logs) | runs in EVERY session; was 10s/5s |
-| `collector` poll loop | 60s | transcript scan, usage-truth — both cheap |
-| `dash-generator` rate loop | 60s | EWMA rate publish — cheap |
-| `dash-generator` dashboard loop | 600s | spawns 7–30 day Loki queries per account; does not need to be fresher |
+| `collector` poll loop (host) | 60s | transcript scan, usage-truth — both cheap |
+| `dash-generator` rate loop (Docker) | 60s | EWMA rate publish — cheap |
+| `dash-generator` dashboard loop (Docker) | 600s | spawns 7–30 day Loki queries per account; does not need to be fresher |
 | Grafana re-provision | 300s | re-parses every dashboard on disk |
 | Loki compactor | 600s | the image's default |
 | Dashboard auto-refresh | 300s | each refresh fires ~14 Loki queries |

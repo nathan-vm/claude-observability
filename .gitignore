@@ -17,11 +17,12 @@ grafana/account-limits.json
 # Git worktrees (local dev convenience, not part of the repo).
 .worktrees/
 
-# Scratch workspace for verifying the Go collector/dash-generator port
-# against the isolated loki-verify/grafana-verify pair in docker-compose.yaml
-# — contains generated dashboards with real emails, same rule as
-# grafana/dashboards/accounts/ above.
-.verify-grafana/
+.DS_Store
+
+# Local build output — binaries the wizard/collector are built into by hand
+# (see README.md's "Getting started"); dash-generator now runs in Docker
+# instead (see docker-compose.yaml), so this is just wizard + collector.
+.bin/
 
 # Stray binaries from a plain `go build ./...` run inside a module root
 # (no -o given) — named after the cmd/ subdirectory, e.g. `go build ./...`

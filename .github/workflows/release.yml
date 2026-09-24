@@ -67,11 +67,11 @@ jobs:
         run: |
           ext=""
           if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
-          go build -o "dash-generator-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" ./cmd/dash-generator
+          go build -o "claude-observability-dash-generator-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" ./cmd/dash-generator
       - uses: actions/upload-artifact@v4
         with:
           name: binaries-dash-generator-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: src/dash-generator/dash-generator-*
+          path: src/dash-generator/claude-observability-dash-generator-*
 
   collector:
     runs-on: ubuntu-latest
@@ -102,11 +102,11 @@ jobs:
         run: |
           ext=""
           if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
-          go build -o "collector-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" ./cmd/collector
+          go build -o "claude-observability-collector-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" ./cmd/collector
       - uses: actions/upload-artifact@v4
         with:
           name: binaries-collector-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: src/collector/collector-*
+          path: src/collector/claude-observability-collector-*
 
   release:
     needs: [wizard, dash-generator, collector]

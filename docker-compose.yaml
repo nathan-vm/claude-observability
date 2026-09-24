@@ -67,62 +67,37 @@ services:
       - loki
     restart: unless-stopped
 
-  # Isolated Loki+Grafana pair for verifying the Go collector port against
-  # real transcript data without touching the real stack above (loki/
-  # grafana) or its dashboards. Not started by a plain `docker compose up
-  # -d` — bring it up explicitly with `docker compose up -d loki-verify
-  # grafana-verify` when you actually want it, e.g. `docker compose stop
-  # loki-verify grafana-verify` when done. Same 127.0.0.1-only rule as
-  # everything else in this file.
-  loki-verify:
-    image: grafana/loki:latest
-    command: ["-config.file=/etc/loki/loki-config.yaml"]
-    ports:
-      - "127.0.0.1:47101:3100"
-    volumes:
-      - ./config/loki-config.yaml:/etc/loki/loki-config.yaml:ro
-      - loki-verify-data:/loki
-    restart: unless-stopped
-
-  grafana-verify:
-    image: grafana/grafana:latest
+  # Stands in for "the server": a real deployment runs this centrally, not on
+  # each user's machine — users only ever send OTel (see the wizard's "OTel
+  # endpoint" prompt). Locally there is no separate server yet, so this
+  # container plays that role: it reads Loki the same way it would in
+  # production, and writes the generated dashboards straight into the
+  # ./grafana bind mount the `grafana` service above already reads from.
+  dash-generator:
+    build:
+      context: ./src/dash-generator
     environment:
-      - GF_AUTH_ANONYMOUS_ENABLED=true
-      - GF_AUTH_ANONYMOUS_ORG_NAME=Main Org.
-      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_USERS_DEFAULT_THEME=dark
-      - GF_UNIFIED_ALERTING_ENABLED=false
-      - GF_ALERTING_ENABLED=false
-      - GF_ANALYTICS_REPORTING_ENABLED=false
-      - GF_ANALYTICS_CHECK_FOR_UPDATES=false
-      - GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES=false
-      - GF_NEWS_NEWS_FEED_ENABLED=false
-      - GF_LOG_LEVEL=warn
+      - LOKI_URL=http://loki:3100
+      - EXPORTER_STREAM=claude-code-exporter-1
+      - GRAFANA_DIR=/app/grafana
+      - STATE_FILE=/app/.state/dash-generator-state.json
     volumes:
-      - ./grafana/provisioning-verify:/etc/grafana/provisioning:ro
-      - ./.verify-grafana/dashboards:/var/lib/grafana/dashboards:ro
-      - grafana-verify-data:/var/lib/grafana
-    ports:
-      - "127.0.0.1:47301:3000"
+      - ./grafana:/app/grafana
+      - dash-generator-state:/app/.state
     depends_on:
-      - loki-verify
+      - loki
     restart: unless-stopped
 
-# Everything that used to run here as dashboard-generator and
-# transcript-exporter containers is now src/collector and src/dash-generator
-# — two self-contained Go binaries, ONE host process each (not containers),
-# installed as background services by src/wizard (the setup wizard) — see
-# README.md's "The collector service".
-#
-# Why they moved off Docker: the collector has to run the `claude` CLI (for
-# the /usage ground-truth capture) with your logged-in account's own
-# credentials, and it has to read your real Claude Code config directories
-# (~/.claude-personal, ~/.claude-work, ...) at their real paths — neither is
-# something a container has access to. `docker compose up -d` here only gets
-# you otel-collector + loki + grafana; dash-generator and collector need
-# installing separately, once, via the wizard (src/wizard).
+# The collector (src/collector) is the one piece that does NOT run in this
+# file — it's a host process, installed as a background service by the
+# wizard (src/wizard), not a container. See README.md's "The collector
+# service" for why: it has to run the `claude` CLI (for the /usage
+# ground-truth capture) with your logged-in account's own credentials, and it
+# has to read your real Claude Code config directories (~/.claude-personal,
+# ~/.claude-work, ...) at their real paths — neither is something a container
+# has access to. `docker compose up -d` here gets you otel-collector + loki +
+# grafana + dash-generator; the collector needs installing separately, once,
+# via the wizard.
 
 # WARNING: "docker compose down -v" wipes ALL of these volumes — 90 days of
 # metrics and logs. Irreversible, with no extra confirmation. The collector's
@@ -131,5 +106,4 @@ services:
 volumes:
   grafana-data:
   loki-data:
-  grafana-verify-data:
-  loki-verify-data:
+  dash-generator-state:

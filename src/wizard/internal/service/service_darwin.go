@@ -34,7 +34,11 @@ func GeneratePlist(cfg Config) string {
 	for _, a := range cfg.Args {
 		fmt.Fprintf(&argsXML, "    <string>%s</string>\n", xmlEscape(a))
 	}
-	pathEnv := filepath.Dir(cfg.Command) + ":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+	pathEnv := filepath.Dir(cfg.Command)
+	if cfg.ExtraPathDirs != "" {
+		pathEnv += ":" + cfg.ExtraPathDirs
+	}
+	pathEnv += ":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

@@ -119,15 +119,6 @@ func run() error {
 		fmt.Fprintf(out, "  not monitored: %v\n", emails)
 	}
 
-	fmt.Fprintln(out, "\n── Dash generator ─────────────────────────────────────────")
-	fmt.Fprintln(out, "  Generates per-account Grafana dashboards and publishes the rate panel.")
-	if wizard.AskYesNo(out, stdin, "  Install the dash generator as a background service now?", true) {
-		if err := installService(repoRoot, collectorVars); err != nil {
-			return fmt.Errorf("installing dash generator service: %w", err)
-		}
-		fmt.Fprintln(out, "  installed and started")
-	}
-
 	fmt.Fprintln(out, "\n── Collector ─────────────────────────────────────────────────")
 	if wizard.AskYesNo(out, stdin, "  Install the collector as a background service now?", true) {
 		if err := installCollectorService(repoRoot, collectorVars); err != nil {
@@ -189,52 +180,6 @@ func writeShellConfig(out *os.File, home string, vars []envwriter.Var) error {
 	return nil
 }
 
-func installService(repoRoot string, collectorVars []envwriter.Var) error {
-	dashGeneratorBin, err := findDashGeneratorBinary(repoRoot)
-	if err != nil {
-		return err
-	}
-	cfg := service.Config{
-		Label:      dashGeneratorLabel(),
-		Command:    dashGeneratorBin,
-		WorkingDir: repoRoot,
-		Env:        collectorVars,
-		LogDir:     filepath.Join(repoRoot, ".state"),
-	}
-	return service.Install(cfg)
-}
-
-// findDashGeneratorBinary looks for a dash-generator binary built
-// alongside this one (same directory as the running setup executable) or
-// on PATH — it isn't bundled inside claude-observability-wizard itself.
-func findDashGeneratorBinary(repoRoot string) (string, error) {
-	name := "dash-generator"
-	if runtime.GOOS == "windows" {
-		name += ".exe"
-	}
-	if exe, err := os.Executable(); err == nil {
-		candidate := filepath.Join(filepath.Dir(exe), name)
-		if _, statErr := os.Stat(candidate); statErr == nil {
-			return candidate, nil
-		}
-	}
-	if path, err := exec.LookPath(name); err == nil {
-		return path, nil
-	}
-	return "", fmt.Errorf("%s not found next to this binary or on PATH — build it from dash-generator/ or download it alongside claude-observability-wizard", name)
-}
-
-func dashGeneratorLabel() string {
-	switch runtime.GOOS {
-	case "darwin":
-		return "com.claude-observability.dash-generator"
-	case "windows":
-		return "ClaudeObservabilityDashGenerator"
-	default:
-		return "claude-observability-dash-generator"
-	}
-}
-
 func installCollectorService(repoRoot string, collectorVars []envwriter.Var) error {
 	collectorBin, err := findCollectorBinary(repoRoot)
 	if err != nil {
@@ -246,14 +191,33 @@ func installCollectorService(repoRoot string, collectorVars []envwriter.Var) err
 		WorkingDir: repoRoot,
 		Env:        collectorVars,
 		LogDir:     filepath.Join(repoRoot, ".state"),
+		// The collector shells out to `claude` (for usage-truth) with only
+		// this process's own PATH — launchd/systemd don't source a shell rc,
+		// so a `claude` installed somewhere other than the OS-standard bin
+		// dirs (Homebrew on Apple Silicon: /opt/homebrew/bin, nvm, a global
+		// npm prefix, ...) would otherwise 404. Resolve it once, here, from
+		// the wizard's own (interactive, real) PATH and bake its directory
+		// in alongside the standard ones.
+		ExtraPathDirs: claudeBinDir(),
 	}
 	return service.Install(cfg)
+}
+
+// claudeBinDir returns the directory containing the `claude` CLI as found on
+// this process's own PATH, or "" if it isn't found (the service will still
+// install — just without usage-truth working until `claude` is reachable).
+func claudeBinDir() string {
+	path, err := exec.LookPath("claude")
+	if err != nil {
+		return ""
+	}
+	return filepath.Dir(path)
 }
 
 // findCollectorBinary looks for a collector binary built alongside this
 // one (same directory as the running setup executable) or on PATH.
 func findCollectorBinary(repoRoot string) (string, error) {
-	name := "collector"
+	name := "claude-observability-collector"
 	if runtime.GOOS == "windows" {
 		name += ".exe"
 	}
@@ -266,7 +230,7 @@ func findCollectorBinary(repoRoot string) (string, error) {
 	if path, err := exec.LookPath(name); err == nil {
 		return path, nil
 	}
-	return "", fmt.Errorf("%s not found next to this binary or on PATH — build it from collector/ or download it alongside claude-observability-wizard", name)
+	return "", fmt.Errorf("%s not found next to this binary or on PATH — build it from src/collector (go build -o %s ./cmd/collector) or download it alongside claude-observability-wizard", name, name)
 }
 
 func collectorLabel() string {

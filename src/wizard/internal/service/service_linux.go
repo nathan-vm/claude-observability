@@ -28,7 +28,11 @@ func GenerateUnit(cfg Config) string {
 	for _, v := range cfg.Env {
 		fmt.Fprintf(&envLines, "Environment=%s=%s\n", v.Name, v.Value)
 	}
-	pathEnv := filepath.Dir(cfg.Command) + ":/usr/local/bin:/usr/bin:/bin"
+	pathEnv := filepath.Dir(cfg.Command)
+	if cfg.ExtraPathDirs != "" {
+		pathEnv += ":" + cfg.ExtraPathDirs
+	}
+	pathEnv += ":/usr/local/bin:/usr/bin:/bin"
 	execLine := cfg.Command
 	for _, a := range cfg.Args {
 		execLine += " " + a

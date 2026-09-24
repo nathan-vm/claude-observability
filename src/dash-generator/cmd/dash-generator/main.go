@@ -21,9 +21,24 @@ func main() {
 }
 
 func run() error {
-	repoRoot, err := findRepoRoot()
-	if err != nil {
-		return err
+	grafanaDir := os.Getenv("GRAFANA_DIR")
+	statePath := os.Getenv("STATE_FILE")
+	if grafanaDir == "" || statePath == "" {
+		// Local/dev use: no server yet to run this against, so it's driven
+		// by hand from a checkout — infer both from the repo root instead of
+		// requiring every env var. In the container (docker-compose.yaml's
+		// dash-generator service, standing in for "the server"), both are
+		// set explicitly and this branch never runs.
+		repoRoot, err := findRepoRoot()
+		if err != nil {
+			return err
+		}
+		if grafanaDir == "" {
+			grafanaDir = filepath.Join(repoRoot, "grafana")
+		}
+		if statePath == "" {
+			statePath = filepath.Join(repoRoot, ".state", "dash-generator-state.json")
+		}
 	}
 
 	lokiURL := envOr("LOKI_URL", "http://localhost:47100")
@@ -36,7 +51,6 @@ func run() error {
 	backfillDays := envInt("RATE_BACKFILL_DAYS", 14)
 	pollSeconds := envInt("POLL_SECONDS", 60)
 	dashboardIntervalSeconds := envInt("DASHBOARD_INTERVAL_SECONDS", 600)
-	statePath := filepath.Join(repoRoot, ".state", "dash-generator-state.json")
 
 	once := hasArg("--once")
 	dryRun := hasArg("--dry-run")
@@ -71,7 +85,7 @@ func run() error {
 			return nil
 		}
 		if err := dashboardgen.GenerateDashboards(dashboardgen.Config{
-			LokiURL: lokiURL, ExporterStream: exporterStream, RateHalfLife: rateHalfLife, GrafanaDir: filepath.Join(repoRoot, "grafana"),
+			LokiURL: lokiURL, ExporterStream: exporterStream, RateHalfLife: rateHalfLife, GrafanaDir: grafanaDir,
 		}, log); err != nil {
 			log("dashboard generation failed: %v", err)
 		}

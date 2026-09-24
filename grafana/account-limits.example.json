@@ -8,20 +8,13 @@
     "Anthropic does not expose the limit through any telemetry, and it varies by",
     "plan — hence per account rather than a single number.",
     "",
-    "CALIBRATION IS AUTOMATIC NOW: collector/usage-truth.mjs runs /usage per",
-    "account every pass and writes block_5h/week here itself, applying the same",
-    "formula this used to ask you to run by hand: limit = meter_tokens /",
-    "(usage_percentage / 100), against what the meter published to Loki at that",
-    "moment ({service_name=\"claude-code-usage\"} | user_email = `<email>`). It",
-    "also writes week_start_day/week_start_hour — the account's REAL weekly reset",
-    "moment, parsed from /usage's own text, which usage-meter.mjs uses instead of",
-    "the global WEEK_START_DAY/WEEK_START_HOUR guess in .env. To calibrate by",
-    "hand instead, apply the same formula and edit block_5h/week directly.",
+    "PURELY USER-SET — there is no automatic calibration. Accounts with no entry",
+    "under 'accounts' fall back to the 'default' block. See README.md, 'The",
+    "limit references', for how to calibrate by hand against /usage.",
     "",
-    "Accounts with no entry under 'accounts' fall back to the 'default' block.",
     "'ignore': accounts that should not get a dashboard. Useful for a deactivated",
-    "or third-party account that still shows up in old Prometheus labels until",
-    "retention expires."
+    "or third-party account that still shows up in old Loki data until retention",
+    "expires."
   ],
   "default": {
     "block_5h": 1750000,
@@ -30,10 +23,7 @@
   "accounts": {
     "you@example.com": {
       "block_5h": 1750000,
-      "week": 21500000,
-      "week_start_day": 1,
-      "week_start_hour": 0,
-      "_calibrated": "YYYY-MM-DDTHH:MM:SS.sssZ auto from /usage = X% (block), Y% (week)"
+      "week": 21500000
     }
   },
   "ignore": []
