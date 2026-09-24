@@ -30,6 +30,13 @@ jobs:
 
       - name: Compute next version, update changelog, tag
         id: compute
+        # NOTE: this step commits the changelog and pushes the tag BEFORE
+        # the build/release jobs run below. If any build job fails after
+        # this step succeeds, main is left with a tag + changelog commit
+        # but no GitHub Release. Recovery: use "Re-run failed jobs" (NOT
+        # "Re-run all jobs") — re-running this step would see the tag it
+        # already created, find no new releasable commits, and skip the
+        # rebuild entirely, silently abandoning the release.
         run: |
           output="$(.github/scripts/compute-next-version.sh /tmp/changelog-fragment.md)"
           echo "$output" >> "$GITHUB_OUTPUT"

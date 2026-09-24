@@ -5,6 +5,9 @@ on:
     branches: [main]
     types: [opened, edited, synchronize, reopened]
 
+permissions:
+  pull-requests: read
+
 jobs:
   title-check:
     name: Conventional Commit Title

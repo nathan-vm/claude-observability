@@ -21,10 +21,16 @@ if ! git tag -l 'v*' | grep -q .; then
   subjects=$(git log --format="%s" --first-parent)
 else
   last_tag=$(git describe --tags --abbrev=0 --match 'v*')
+
+  if [[ ! "${last_tag#v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "error: last tag '${last_tag}' is not shaped like vMAJOR.MINOR.PATCH" >&2
+    exit 1
+  fi
+
   subjects=$(git log "${last_tag}..HEAD" --format="%s" --first-parent)
 
   increment=""
-  if [ -n "$subjects" ] && echo "$subjects" | grep -qE '^.+(\(.+\))?!:'; then
+  if [ -n "$subjects" ] && echo "$subjects" | grep -qE '^[a-z]+(\(.+\))?!:'; then
     increment=major
   elif [ -n "$subjects" ] && echo "$subjects" | grep -qE '^feat(\(.+\))?:'; then
     increment=minor
@@ -54,7 +60,7 @@ if [ "$bumped" = true ]; then
   {
     echo "## [${version}] - $(date -u +%Y-%m-%d)"
     echo
-    changed=$(echo "$subjects" | grep -E '^.+(\(.+\))?!:' || true)
+    changed=$(echo "$subjects" | grep -E '^[a-z]+(\(.+\))?!:' || true)
     added=$(echo "$subjects" | grep -E '^feat(\(.+\))?:' || true)
     fixed=$(echo "$subjects" | grep -E '^(fix|perf|refactor)(\(.+\))?:' || true)
     if [ -n "$changed" ]; then
