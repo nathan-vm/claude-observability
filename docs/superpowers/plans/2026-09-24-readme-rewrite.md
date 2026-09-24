@@ -1,3 +1,39 @@
+# README Rewrite Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Replace `README.md`'s personal-project, journal-style content with a professional, concise, open-source-ready README that explains why each component exists, which side of the client/server split it runs on, and carries deep design rationale in a FAQ instead of the main body.
+
+**Architecture:** This is a content-only change — no code, config, or dashboard behavior changes. Two tasks: (1) write the full replacement `README.md`, (2) verify every command/path/port/var named in it against the actual source and fix any drift, since the old README is not a trustworthy source of truth for current behavior.
+
+**Tech Stack:** Markdown only. Verification uses `grep`, `go build`, `docker compose config`, and manual comparison against `docker-compose.yaml`, the three `src/*/cmd/*/main.go` entrypoints, and `.github/workflows/*.yml`.
+
+**Spec:** `docs/superpowers/specs/2026-09-24-readme-rewrite.md`
+
+## Global Constraints
+
+- README content only — do not change behavior of any script, config, or dashboard.
+- Every command, path, port, env var name, and binary name written into the README must be verified against current source, not copied from the old README on faith.
+- Every internal Markdown anchor link used (e.g. `#faq`) must resolve to a real heading in the new file.
+- Do not add a `LICENSE` or `CONTRIBUTING.md` — out of scope for this plan.
+- Do not delete `docs/superpowers/specs/2026-09-23-*.md` (collector/dash-generator/wizard design specs) — the new README intentionally defers deep detail to them; they must keep existing.
+
+---
+
+### Task 1: Write the new README.md
+
+**Files:**
+- Modify: `README.md` (full replacement)
+
+**Interfaces:**
+- Consumes: nothing (this is the first task).
+- Produces: the complete new `README.md` content, which Task 2 verifies and corrects.
+
+- [ ] **Step 1: Write the full replacement content to `README.md`**
+
+Use the Write tool (or equivalent full-file replace) to overwrite `README.md` with exactly this content:
+
+````markdown
 # Claude Observability
 
 **Self-hosted usage dashboards for Claude Code.** Track how much of your
@@ -309,3 +345,118 @@ Around 700 MiB at rest, near-zero CPU. Poll intervals are tuned for
 freshness where it matters (60s for the collector and the rate loop) and
 left slower where it doesn't (600s for full dashboard regeneration, which
 runs multi-day Loki queries per account).
+````
+
+- [ ] **Step 2: Sanity-check the file locally**
+
+Confirm the file was written and has no obvious Markdown breakage (unclosed code fences, mismatched table pipes):
+
+```sh
+wc -l README.md
+grep -c '^```' README.md   # must be even
+```
+
+Expected: `wc -l` reports roughly 230–260 lines; the code-fence count is even (every opened fence is closed).
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add README.md docs/superpowers/specs/2026-09-24-readme-rewrite.md docs/superpowers/plans/2026-09-24-readme-rewrite.md
+git commit -m "docs: rewrite README for open-source audience"
+```
+
+---
+
+### Task 2: Verify the new README against source and fix drift
+
+**Files:**
+- Modify: `README.md` (only if a check below finds a mismatch)
+
+**Interfaces:**
+- Consumes: the `README.md` written in Task 1.
+- Produces: a README where every command, path, port, and name has been checked against the file that actually defines it.
+
+- [ ] **Step 1: Verify ports and Docker service names against `docker-compose.yaml`**
+
+```sh
+grep -n '127.0.0.1' docker-compose.yaml
+```
+
+Expected output includes exactly these three port mappings — confirm each
+matches what's written in the README's "Services" table:
+
+```
+"127.0.0.1:47317:4317"
+"127.0.0.1:47318:4318"
+"127.0.0.1:47100:3100"
+"127.0.0.1:47300:3000"
+```
+
+If any port in the README doesn't match this output, edit the "Services"
+table in `README.md` to the correct value.
+
+- [ ] **Step 2: Verify env var names and defaults against the three `main.go` entrypoints**
+
+```sh
+grep -n 'envOr\|envInt\|os.Getenv' src/collector/cmd/collector/main.go
+grep -n 'envOr\|envInt\|os.Getenv' src/dash-generator/cmd/*/main.go
+grep -n 'CLAUDE_OBSERVABILITY_EXTRA_DIRS\|CLAUDE_DIR' src/wizard/cmd/wizard/main.go src/wizard/internal/**/*.go 2>/dev/null
+```
+
+Cross-check every variable name and default listed in the README's
+"Configuration" table against this output:
+`CLAUDE_DIR`, `CLAUDE_OBSERVABILITY_EXTRA_DIRS`, `EXPORTER_STREAM`,
+`LOKI_URL`, `POLL_SECONDS`, `RATE_HALFLIFE`, `RATE_BACKFILL_DAYS`,
+`DASHBOARD_INTERVAL_SECONDS`, `DEDUP_DAYS`, `BATCH_SIZE`,
+`ORPHAN_AFTER_MS`, `EMAIL_LOOKBACK_HOURS`, `STATE_FILE`.
+
+If a name or default in the README doesn't match the source, edit the
+"Configuration" table in `README.md` to the correct value.
+
+- [ ] **Step 3: Verify binary/build commands against `go.mod` and the release workflow**
+
+```sh
+grep module src/wizard/go.mod src/collector/go.mod src/dash-generator/go.mod
+grep -A2 'go build -o' .github/workflows/release.yml
+```
+
+Confirm the README's Quick Start `go build -o claude-observability-wizard
+./cmd/wizard` and `go build -o claude-observability-collector
+./cmd/collector` commands match the module names and `./cmd/...` paths in
+this output. If not, edit the "Quick start" section in `README.md`.
+
+- [ ] **Step 4: Verify service-manager commands (macOS/Linux/Windows table)**
+
+```sh
+grep -n 'launchctl\|systemctl\|schtasks\|com.claude-observability\|claude-observability-collector.service\|ClaudeObservabilityCollector' -r src/wizard/internal/service
+```
+
+Confirm the service label/unit/task name used in the README's "Managing
+the stack" table (`com.claude-observability.collector`,
+`claude-observability-collector.service`,
+`ClaudeObservabilityCollector`) matches what the service-install code
+actually uses. If not, edit that table in `README.md`.
+
+- [ ] **Step 5: Verify every internal anchor link resolves**
+
+```sh
+grep -oE '\(#[a-z0-9-]+\)' README.md | sort -u
+grep -E '^#+ ' README.md
+```
+
+For each `(#anchor)` in the first command's output, confirm a heading in
+the second command's output slugifies to that anchor (lowercase, spaces
+to hyphens, punctuation stripped). Fix any link in `README.md` that
+doesn't resolve — either correct the anchor text or the heading it should
+point to.
+
+- [ ] **Step 6: Commit any fixes**
+
+If Steps 1–5 found and fixed anything:
+
+```bash
+git add README.md
+git commit -m "docs: fix README details found during verification"
+```
+
+If no fixes were needed, skip this step — nothing to commit.
