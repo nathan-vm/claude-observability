@@ -102,7 +102,7 @@ environment variable, unset ones falling back to sensible built-in defaults
 | Var | Read by | Default |
 |---|---|---|
 | `CLAUDE_DIR`, `CLAUDE_OBSERVABILITY_EXTRA_DIRS` | collector | first discovered account dir |
-| `EXPORTER_STREAM` | collector (shell rc), dash-generator (docker-compose.yaml, substituted from your shell) | `claude-code-exporter-1` |
+| `EXPORTER_STREAM` | collector (shell rc), dash-generator (docker-compose.yaml, substituted from your shell) | `claude-code-exporter-dev` |
 | `LOKI_URL` | collector (shell rc), dash-generator (docker-compose.yaml) | `http://localhost:47100` / `http://loki:3100` in-container |
 | `POLL_SECONDS` | collector, dash-generator (rate loop) | `60` |
 | `DEDUP_DAYS`, `BATCH_SIZE`, `ORPHAN_AFTER_MS`, `EMAIL_LOOKBACK_HOURS`, `STATE_FILE` | collector | see `src/collector/cmd/collector/main.go` |
@@ -234,8 +234,8 @@ package (`src/collector/internal/transcriptscan`) scans every configured
 Claude Code directory (see "More than one account") **recursively** and
 publishes to `{service_name="$EXPORTER_STREAM"}`, with a `kind` label
 separating `tools` (one line per `tool_use` block) from `skills` (one line per
-skill-tagged request). The stream name is **versioned** — see "Rescan and
-reimport" below.
+skill-tagged request). The stream name carries a random per-install id — see
+"Rescan and reimport" below.
 
 #### How tokens are attributed to a tool
 
@@ -335,21 +335,36 @@ Loki is append-only, and the collector stores an offset at the end of each
 transcript — a restart re-reads nothing. Two operations cover this.
 
 **Rescan** (`--rescan`): zeroes the offsets and re-reads everything while keeping
-the dedup map. Use it to generate a **new** record type out of existing history
-without rewriting anything:
+the dedup map **and** the session→email cache. Use it to generate a **new**
+record type out of existing history without rewriting anything:
 
 ```sh
 cd src/collector && go run ./cmd/collector --rescan --once
 ```
 
+That "keeps the cache" part is a trap if the reason you're rescanning is that
+account attribution was *wrong* — a session cached as unattributed (or
+attributed to the wrong account) stays that way forever: it's never
+re-queried, and even if it were, Loki dedups by `tool_use_id`, so the
+already-published bad row just gets skipped as "already exported," not fixed.
+`--rescan` only helps when the transcripts have data the *last* pass hadn't
+reached yet, not when the attribution logic itself changed. For that, reimport.
+
 **Reimport**: to redo the whole derivation (say, after changing how accounts or
-tokens are attributed), bump the stream generation — the single source both
-the collector and dash-generator read. Edit `EXPORTER_STREAM` in your shell rc
-and re-run the wizard to reinstall the collector service with the new value
-(see "The collector service"); docker-compose.yaml's `dash-generator` service
-reads the same variable from your shell (`${EXPORTER_STREAM:-claude-code-exporter-1}`),
-so exporting it before `docker compose up -d dash-generator` is enough —
-no need to hand-edit the compose file too. Then drop the state:
+tokens are attributed), start a fresh stream — the single source both the
+collector and dash-generator read. The wizard mints a random id for this once,
+at install (`EXPORTER_STREAM=claude-code-exporter-<uuid>`, see
+`src/wizard/internal/streamid`) and never touches it again on a re-run, so
+there's no shared counter to coordinate — picking a fresh one is a local,
+one-machine decision, same as it always was even when it looked like a shared
+number. To force one: generate a new id by hand (`uuidgen` on macOS/Linux,
+or `[guid]::NewGuid()` in PowerShell) and set `EXPORTER_STREAM=claude-code-exporter-<new-id>`
+in your shell rc, then re-run the wizard to reinstall the collector service
+with it (see "The collector service"); docker-compose.yaml's `dash-generator`
+service reads the same variable from your shell
+(`${EXPORTER_STREAM:-claude-code-exporter-dev}`), so exporting it before
+`docker compose up -d dash-generator` is enough — no need to hand-edit the
+compose file too. Then drop the state:
 
 ```sh
 rm -rf .state                                          # collector's state

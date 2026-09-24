@@ -14,6 +14,7 @@ import (
 	"claude-observability-wizard/internal/health"
 	"claude-observability-wizard/internal/limits"
 	"claude-observability-wizard/internal/service"
+	"claude-observability-wizard/internal/streamid"
 	"claude-observability-wizard/internal/wizard"
 )
 
@@ -93,7 +94,17 @@ func run() error {
 			}
 			collectorVars = append(collectorVars, envwriter.Var{Name: "CLAUDE_OBSERVABILITY_EXTRA_DIRS", Value: extra})
 		}
-		collectorVars = append(collectorVars, envwriter.Var{Name: "EXPORTER_STREAM", Value: "claude-code-exporter-1"})
+		// A random id per install rather than a shared sequential counter —
+		// see internal/streamid. Discarded on a re-run: WriteBlock below is
+		// a no-op once the marker exists, so this only ever takes effect
+		// the first time (on Windows, WriteWindows has no such marker and
+		// setx always overwrites, so a re-run there does mint a new one —
+		// same as it already does for CLAUDE_DIR today).
+		id, err := streamid.New()
+		if err != nil {
+			return err
+		}
+		collectorVars = append(collectorVars, envwriter.Var{Name: "EXPORTER_STREAM", Value: "claude-code-exporter-" + id})
 	}
 
 	allVars := append(append([]envwriter.Var{}, telemetryVars...), collectorVars...)

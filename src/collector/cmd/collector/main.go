@@ -36,7 +36,12 @@ func run() error {
 	}
 
 	lokiURL := envOr("LOKI_URL", "http://localhost:47100")
-	exporterStream := envOr("EXPORTER_STREAM", "claude-code-exporter-1")
+	// Real installs always have this set by the wizard (a random id per
+	// install, see src/wizard/internal/streamid) — this fallback only
+	// fires for an ad hoc run outside that flow (dev/test), so it doesn't
+	// need to match any specific value, only the same one dash-generator
+	// falls back to.
+	exporterStream := envOr("EXPORTER_STREAM", "claude-code-exporter-dev")
 	pollSeconds := envInt("POLL_SECONDS", 60)
 	statePath := envOr("STATE_FILE", filepath.Join(repoRoot, ".state", "collector-state.json"))
 

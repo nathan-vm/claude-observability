@@ -42,7 +42,11 @@ func run() error {
 	}
 
 	lokiURL := envOr("LOKI_URL", "http://localhost:47100")
-	exporterStream := envOr("EXPORTER_STREAM", "claude-code-exporter-1")
+	// Must match the collector's own fallback (src/collector/cmd/collector/main.go)
+	// for the same reason — see the comment there. Real installs never hit
+	// this: docker-compose.yaml substitutes EXPORTER_STREAM from the shell,
+	// where the wizard already set a real, random-per-install value.
+	exporterStream := envOr("EXPORTER_STREAM", "claude-code-exporter-dev")
 	rateHalfLife := envOr("RATE_HALFLIFE", "20m")
 	halfLifeS, err := parseHalfLife(rateHalfLife)
 	if err != nil {
