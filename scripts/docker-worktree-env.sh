@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Generates COMPOSE_PROJECT_NAME + isolated host ports for the worktree this
-# is run from, so `docker compose --env-file docker-worktree.local up -d`
-# can run in several worktrees at once without colliding.
+# is run from, so `docker compose -f docker-compose.dev.yaml --env-file
+# docker-worktree.local up -d` can run in several worktrees at once without
+# colliding.
 #
 # The four base ports (47100/47300/47317/47318) are only ~218 apart, so a
 # flat "add the offset" scheme (safe when ports are thousands apart) isn't
@@ -12,7 +13,7 @@
 #
 # Usage: run from inside the worktree, before `docker compose up`:
 #   scripts/docker-worktree-env.sh
-#   docker compose --env-file docker-worktree.local up -d --build
+#   docker compose -f docker-compose.dev.yaml --env-file docker-worktree.local up -d --build
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
@@ -76,5 +77,5 @@ grafana:       $grafana_port
 loki:          $loki_port
 
 arquivo gerado: $out_file
-rode: docker compose --env-file docker-worktree.local up -d --build
+rode: docker compose -f docker-compose.dev.yaml --env-file docker-worktree.local up -d --build
 EOF

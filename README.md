@@ -90,19 +90,20 @@ container plays that role.
 docker compose up -d
 ```
 
-This builds and starts `otel-collector`, `loki`, `grafana`, and
-`dash-generator`.
+This pulls the published `dash-generator` image and starts it alongside
+`otel-collector`, `loki`, and `grafana`.
 
-**2. Get the two client binaries.** Download `claude-observability-wizard`
-and `claude-observability-collector` for your OS/arch from this repo's
-[Releases page](../../releases), or build them yourself:
+**2. Get the two client binaries.** Download the zip for your OS/arch
+from this repo's [Releases page](../../releases) — each one bundles
+`claude-observability-wizard` and `claude-observability-collector`
+together — or build them yourself:
 
 ```sh
 cd src/wizard && go build -o claude-observability-wizard ./cmd/wizard
 cd src/collector && go build -o claude-observability-collector ./cmd/collector
 ```
 
-Put both binaries in the same directory.
+Unzip (or place both built binaries) into the same directory.
 
 **3. Run the wizard** from the repo root:
 
