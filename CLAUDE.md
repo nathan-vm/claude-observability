@@ -19,6 +19,10 @@ project does; this file is about how to work on it with Claude Code.
   derived from `v*` git tags at release time.
 - See `docs/superpowers/specs/2026-09-24-trunk-based-release-design.md`
   for the full design.
+- This describes the process landing with `feat/trunk-based-release`;
+  until it merges, neither `pr-title.yml` nor that `release.yml` exist
+  on this branch or `main` — `release.yml` here is tag-triggered only,
+  with no changelog or PR-title enforcement yet.
 
 ## Worktree + docker isolation
 
@@ -50,6 +54,11 @@ changes).
 All four subagents are pinned to Sonnet, effort high. Escalating beyond
 that (Opus, or higher effort) is never an agent's call alone — ask the
 user first.
+
+This repo's `.claude/settings.json` auto-enables the `superpowers-dev`
+marketplace (`github.com/obra/superpowers`) for any session opened
+here, tracking its default branch with no version pin — worth knowing
+for supply-chain awareness.
 
 ## Go module layout
 
