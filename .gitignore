@@ -17,6 +17,10 @@ grafana/account-limits.json
 # Git worktrees (local dev convenience, not part of the repo).
 .worktrees/
 
+# Generated per-worktree docker-compose env (ports/project name) — see
+# scripts/docker-worktree-env.sh. Machine-specific, never committed.
+docker-worktree.local
+
 .DS_Store
 
 # Local build output — binaries the wizard/collector are built into by hand
