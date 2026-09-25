@@ -8,8 +8,8 @@
       "Bash(git diff:*)",
       "Bash(git log:*)",
       "Bash(git worktree add:*)",
-      "Bash(git worktree remove:*)",
-      "Bash(git worktree list:*)"
+      "Bash(git worktree list:*)",
+      "Bash(docker compose:*)"
     ]
   },
   "enabledPlugins": {
