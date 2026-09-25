@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.2] - 2026-09-25
+
+### Fixed
+- fix: download only package artifacts in the release job (#7)
+
 ## [0.1.1] - 2026-09-25
 
 ### Fixed
