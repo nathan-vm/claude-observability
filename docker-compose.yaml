@@ -74,8 +74,7 @@ services:
   # production, and writes the generated dashboards straight into the
   # ./grafana bind mount the `grafana` service above already reads from.
   dash-generator:
-    build:
-      context: ./src/dash-generator
+    image: nathanvm/claude-observability-dash-generator:latest
     environment:
       - LOKI_URL=http://loki:3100
       - EXPORTER_STREAM=${EXPORTER_STREAM:-claude-code-exporter-dev}
