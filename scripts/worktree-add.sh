@@ -34,7 +34,7 @@ if ! [[ "$descricao" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
   exit 1
 fi
 
-repo_root="$(git rev-parse --show-toplevel)"
+repo_root="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
 slug="${tipo}-${descricao}"
 worktree_path="$repo_root/.worktrees/$slug"
 branch="$tipo/$descricao"
