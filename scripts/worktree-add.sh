@@ -35,6 +35,7 @@ if ! [[ "$descricao" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
 fi
 
 repo_root="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 slug="${tipo}-${descricao}"
 worktree_path="$repo_root/.worktrees/$slug"
 branch="$tipo/$descricao"
@@ -53,7 +54,7 @@ mkdir -p "$repo_root/.worktrees"
 git -C "$repo_root" fetch origin main --quiet
 git -C "$repo_root" worktree add "$worktree_path" -b "$branch" origin/main
 
-(cd "$worktree_path" && "$repo_root/scripts/docker-worktree-env.sh")
+(cd "$worktree_path" && "$script_dir/docker-worktree-env.sh")
 
 echo
 echo "worktree:  $worktree_path"
