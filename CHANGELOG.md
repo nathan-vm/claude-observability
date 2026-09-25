@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.1] - 2026-09-25
+
+### Fixed
+- fix: correct release-asset naming and stale install instructions (#6)
+
 ## [0.1.0] - 2026-09-25
 
 ### Added
