@@ -18,7 +18,13 @@ import (
 	"claude-observability-wizard/internal/wizard"
 )
 
+var version = "dev"
+
 func main() {
+	if hasArg("--version") {
+		fmt.Println(version)
+		return
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
@@ -253,4 +259,13 @@ func collectorLabel() string {
 	default:
 		return "claude-observability-collector"
 	}
+}
+
+func hasArg(name string) bool {
+	for _, a := range os.Args[1:] {
+		if a == name {
+			return true
+		}
+	}
+	return false
 }

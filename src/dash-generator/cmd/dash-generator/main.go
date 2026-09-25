@@ -13,7 +13,13 @@ import (
 	"claude-observability-dash-generator/internal/state"
 )
 
+var version = "dev"
+
 func main() {
+	if hasArg("--version") {
+		fmt.Println(version)
+		return
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)

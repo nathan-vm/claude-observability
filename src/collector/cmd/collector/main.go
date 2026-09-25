@@ -12,7 +12,13 @@ import (
 	"claude-observability-collector/internal/usagetruth"
 )
 
+var version = "dev"
+
 func main() {
+	if hasArg("--version") {
+		fmt.Println(version)
+		return
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
