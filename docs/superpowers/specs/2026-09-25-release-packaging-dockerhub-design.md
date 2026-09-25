@@ -61,25 +61,12 @@ packaging problem.
 
 ## Non-goals
 
-- Configuring the `DOCKERHUB_TOKEN` GitHub Actions secret — this is a
-  manual, one-time step the owner does directly in GitHub (`gh secret
-  set DOCKERHUB_TOKEN` or the web UI), never through this conversation or
-  any committed file, since secret values must never appear in chat or
-  in the repo.
 - Any change to `compute-next-version.sh`'s version/changelog logic —
   this spec only changes what gets *built and published* once a version
   number already exists, not how that number is computed.
 - Any change to the `otel-collector`/`loki`/`grafana` service
   definitions themselves (images, config) — only `dash-generator`'s
   service definition changes, in both compose files.
-- Solving port/project-name collision between `docker-compose.yaml` and
-  `docker-compose.dev.yaml` when both are run *without* an isolating
-  `--env-file` from the same checkout. The existing `docker-worktree.local`
-  mechanism (from `2026-09-24-claude-multiagent-worktree-design.md`)
-  already isolates the normal case (worktree-based dev); an ad hoc `docker
-  compose -f docker-compose.dev.yaml up` with no env-file, run from the
-  main checkout while the main checkout's own prod stack is also up, is
-  an edge case this spec doesn't solve (see Edge cases).
 
 ## Design
 
@@ -118,11 +105,10 @@ Dockerfile has no equivalent download-at-build-time step). GHA build
 cache (`cache-from`/`cache-to: type=gha`) carried over from the
 obsidian-mcp pattern since it's free and speeds up the multi-arch build.
 
-`vars.DOCKERHUB_USERNAME` is a GitHub Actions repository *variable*
-(non-secret) — the owner already has one set to `nathanvm` on
-`obsidian-mcp`; this spec assumes the same value gets set on this repo
-(the owner can set it themselves, or ask this session to via `gh
-variable set`, since it's not sensitive).
+`vars.DOCKERHUB_USERNAME` (`nathanvm`) and `secrets.DOCKERHUB_TOKEN` are
+already configured on this repo (confirmed via `gh variable list`/`gh
+secret list`, 2026-09-25) — no rollout-ordering step needed before this
+merges.
 
 ### `docker-compose.yaml` (production/end-user file)
 
@@ -145,13 +131,32 @@ A **complete, independent** compose file — not a `-f a -f b` override
 layered on `docker-compose.yaml`. Contains all four services
 (`otel-collector`, `loki`, `grafana`, `dash-generator`) with identical
 definitions to `docker-compose.yaml`, except `dash-generator` keeps
-`build: context: ./src/dash-generator` instead of `image:`. Top-level
-`name: claude-observability-dev` (distinct from the prod file's
-`name: claude-observability`) so that a bare `docker compose -f
-docker-compose.dev.yaml up` (no `--env-file`) doesn't collide
-container/network/volume names with a bare `docker compose up` from the
-same checkout — both still default to the *same ports* in that scenario
-(see Non-goals), but at least don't collide on project identity.
+`build: context: ./src/dash-generator` instead of `image:`, and its
+**default host ports are entirely different from prod's**, per the
+owner's explicit requirement that prod and dev never share default
+ports:
+
+| | prod (`docker-compose.yaml`) | dev (`docker-compose.dev.yaml`) |
+|---|---|---|
+| OTLP gRPC | `47317` | `40317` |
+| OTLP HTTP | `47318` | `40318` |
+| Grafana | `47300` | `40300` |
+| Loki | `47100` | `40100` |
+
+Same last-three-digits pattern, different hundred-thousands prefix
+(`40xxx` vs `47xxx`) — easy to keep straight, and far outside the
+worktree-isolation band (`47100`–`62318`, from
+`scripts/docker-worktree-env.sh`'s offset×300 scheme), so a dev-file
+default can never collide with a worktree-isolated instance either. The
+env var *names* stay identical (`OTEL_GRPC_PORT`, `OTEL_HTTP_PORT`,
+`GRAFANA_PORT`, `LOKI_PORT`) — only the `:-default` fallback differs —
+so `docker-worktree.local` (which sets these same names) still overrides
+correctly when used with the dev file.
+
+Top-level `name: claude-observability-dev` (distinct from the prod
+file's `name: claude-observability`), so a bare `docker compose -f
+docker-compose.dev.yaml up` (no `--env-file`) collides with prod on
+neither ports nor container/network/volume identity.
 
 Usage: `docker compose -f docker-compose.dev.yaml --env-file
 docker-worktree.local up -d --build`. This is what changes in the two
@@ -175,30 +180,27 @@ mistaken for an oversight later.
 `FROM golang:1.22-alpine AS build` → `FROM golang:1.25-alpine AS build`.
 One-line change, no other Dockerfile behavior affected.
 
+### `CLAUDE.md` cleanup (unrelated drift, fixed while already editing this file)
+
+The "Worktree + docker isolation" section's compose command needs
+updating regardless (see above). While in this file: its "Release
+conventions" section still has a leftover line from before
+`trunk-based-release` merged — "until it merges, neither `pr-title.yml`
+nor that `release.yml` exist on this branch or `main`" — which is now
+false (both merged in #3). Remove that stale sentence in the same
+commit.
+
 ## Edge cases
 
-- **`DOCKERHUB_TOKEN` not yet configured when this merges**: the very
-  next push to `main` after this lands auto-triggers a release (per the
-  existing trunk-based pipeline) whose new `docker` job would fail
-  without the secret. This is a real rollout ordering constraint, not
-  just a hypothetical — the owner needs to add the secret *before*
-  merging this PR, or the first release after merge fails partway (the
-  `package`/binary-zip assets would still publish fine; only the
-  `docker` job fails, since GitHub Actions jobs run independently
-  unless one `needs` the other, and `docker` doesn't gate `package` or
-  vice versa).
 - **Zip contents on Windows**: the Windows leg's zip contains
   `claude-observability-wizard-windows-amd64.exe` and `claude-
   observability-collector-windows-amd64.exe` — `.exe` suffix preserved
   inside the archive, matching today's loose-binary naming exactly, just
   bundled.
 - **`docker-compose.dev.yaml` and `docker-compose.yaml` run
-  simultaneously without isolation**: covered under Non-goals — the
-  distinct `name:` avoids a *container/network/volume* collision, but
-  both still default to the same host ports (`47317` etc.) without an
-  env-file, so one of the two `up` commands would fail to bind. Expected
-  usage is always through `docker-worktree.local`, which isolates ports
-  too.
+  simultaneously, both with no `--env-file`**: now safe by construction —
+  distinct `name:` (no container/network/volume collision) *and* distinct
+  default ports (`40xxx` vs `47xxx`, no port-bind collision either).
 
 ## Testing
 
@@ -213,7 +215,10 @@ One-line change, no other Dockerfile behavior affected.
 - **`docker-compose.dev.yaml` standalone**: `docker compose -f
   docker-compose.dev.yaml --env-file <a test env file> up -d --build`
   brings up all 4 services healthy, confirms it needs nothing from
-  `docker-compose.yaml`.
+  `docker-compose.yaml`. Separately, `docker compose -f docker-
+  compose.dev.yaml config` with no env-file confirms the `40xxx` default
+  ports, and running it alongside a `docker compose up` (prod, no
+  env-file) confirms both come up with no port or project-name collision.
 - **`docker-compose.yaml` unchanged behavior for the other 3 services**:
   `docker compose config` before/after this change, diffed, shows only
   the `dash-generator` service's `build`→`image` change — nothing else
