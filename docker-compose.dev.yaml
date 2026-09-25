@@ -1,0 +1,83 @@
+name: claude-observability-dev
+
+# Standalone dev/QA stack — NOT layered on top of docker-compose.yaml (never
+# run as `-f docker-compose.yaml -f docker-compose.dev.yaml`, always
+# `-f docker-compose.dev.yaml` alone). Same 4 services as docker-compose.yaml,
+# except dash-generator builds from local source here instead of pulling the
+# published image, and every default port is in the 40xxx range instead of
+# 47xxx so this can run at the same time as the "prod" file without colliding
+# on ports or on container/network/volume identity (distinct `name:` above).
+# See docs/superpowers/specs/2026-09-25-release-packaging-dockerhub-design.md.
+#
+# Every port is published on 127.0.0.1 only, same reasoning as
+# docker-compose.yaml: unauthenticated Grafana/Loki/OTLP access has no
+# business being reachable from other devices on the network.
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.160.0
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./config/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "127.0.0.1:${OTEL_GRPC_PORT:-40317}:4317"
+      - "127.0.0.1:${OTEL_HTTP_PORT:-40318}:4318"
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:latest
+    command: ["-config.file=/etc/loki/loki-config.yaml"]
+    ports:
+      - "127.0.0.1:${LOKI_PORT:-40100}:3100"
+    volumes:
+      - ./config/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki-data:/loki
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_NAME=Main Org.
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_DEFAULT_THEME=dark
+      - GF_UNIFIED_ALERTING_ENABLED=false
+      - GF_ALERTING_ENABLED=false
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_ANALYTICS_CHECK_FOR_UPDATES=false
+      - GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES=false
+      - GF_NEWS_NEWS_FEED_ENABLED=false
+      - GF_LOG_LEVEL=warn
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-40300}:3000"
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+  dash-generator:
+    build:
+      context: ./src/dash-generator
+    environment:
+      - LOKI_URL=http://loki:3100
+      - EXPORTER_STREAM=${EXPORTER_STREAM:-claude-code-exporter-dev}
+      - GRAFANA_DIR=/app/grafana
+      - STATE_FILE=/app/.state/dash-generator-state.json
+    volumes:
+      - ./grafana:/app/grafana
+      - dash-generator-state:/app/.state
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+volumes:
+  grafana-data:
+  loki-data:
+  dash-generator-state:

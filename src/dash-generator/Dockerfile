@@ -1,7 +1,7 @@
 # Stands in for "the server" in local dev: everywhere else, a user's machine
 # only ever sends OTel — dashboard generation happens here, not on their
 # laptop. See docker-compose.yaml's dash-generator service and README.md.
-FROM golang:1.22-alpine AS build
+FROM golang:1.25-alpine AS build
 WORKDIR /src
 COPY go.mod ./
 COPY . .

@@ -62,7 +62,7 @@ jobs:
             echo "CHANGELOG_EOF" >> "$GITHUB_OUTPUT"
           fi
 
-  wizard:
+  package:
     needs: compute-version
     if: needs.compute-version.outputs.bumped == 'true'
     runs-on: ubuntu-latest
@@ -84,7 +84,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
-      - name: build
+
+      - name: build wizard
         working-directory: src/wizard
         env:
           GOOS: ${{ matrix.goos }}
@@ -94,71 +95,8 @@ jobs:
           ext=""
           if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
           go build -ldflags "-X main.version=${{ needs.compute-version.outputs.version }}" -o "claude-observability-wizard-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" ./cmd/wizard
-      - uses: actions/upload-artifact@v4
-        with:
-          name: binaries-wizard-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: src/wizard/claude-observability-wizard-*
 
-  dash-generator:
-    needs: compute-version
-    if: needs.compute-version.outputs.bumped == 'true'
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
-          - goos: windows
-            goarch: amd64
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.25'
-      - name: build
-        working-directory: src/dash-generator
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: '0'
-        run: |
-          ext=""
-          if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
-          go build -ldflags "-X main.version=${{ needs.compute-version.outputs.version }}" -o "claude-observability-dash-generator-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" ./cmd/dash-generator
-      - uses: actions/upload-artifact@v4
-        with:
-          name: binaries-dash-generator-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: src/dash-generator/claude-observability-dash-generator-*
-
-  collector:
-    needs: compute-version
-    if: needs.compute-version.outputs.bumped == 'true'
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
-          - goos: windows
-            goarch: amd64
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.25'
-      - name: build
+      - name: build collector
         working-directory: src/collector
         env:
           GOOS: ${{ matrix.goos }}
@@ -168,13 +106,53 @@ jobs:
           ext=""
           if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
           go build -ldflags "-X main.version=${{ needs.compute-version.outputs.version }}" -o "claude-observability-collector-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" ./cmd/collector
+
+      - name: zip
+        run: |
+          ext=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
+          zip -j "claude-observability-${{ matrix.goos }}-${{ matrix.goarch }}.zip" \
+            "src/wizard/claude-observability-wizard-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" \
+            "src/collector/claude-observability-collector-${{ matrix.goos }}-${{ matrix.goarch }}${ext}"
+
       - uses: actions/upload-artifact@v4
         with:
-          name: binaries-collector-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: src/collector/claude-observability-collector-*
+          name: package-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: claude-observability-${{ matrix.goos }}-${{ matrix.goarch }}.zip
+
+  docker:
+    needs: compute-version
+    if: needs.compute-version.outputs.bumped == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: src/dash-generator
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ vars.DOCKERHUB_USERNAME }}/claude-observability-dash-generator:${{ needs.compute-version.outputs.version }}
+            ${{ vars.DOCKERHUB_USERNAME }}/claude-observability-dash-generator:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   release:
-    needs: [compute-version, wizard, dash-generator, collector]
+    needs: [compute-version, package, docker]
     if: needs.compute-version.outputs.bumped == 'true'
     runs-on: ubuntu-latest
     steps:
