@@ -162,9 +162,15 @@ jobs:
     if: needs.compute-version.outputs.bumped == 'true'
     runs-on: ubuntu-latest
     steps:
+      # Only the package-* zips. Without this filter the download also picks
+      # up the ".dockerbuild" build-record artifact that docker/build-push-action
+      # uploads on its own — which both flaked the download (failing this whole
+      # job after the tag was already pushed) and would have been attached to
+      # the GitHub Release as a junk asset by `files: dist/*` below.
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: package-*
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
