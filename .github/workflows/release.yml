@@ -94,7 +94,13 @@ jobs:
         run: |
           ext=""
           if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
-          go build -ldflags "-X main.version=${{ needs.compute-version.outputs.version }}" -o "claude-observability-wizard-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" ./cmd/wizard
+          # Bare name, no platform suffix: findCollectorBinary() in
+          # src/wizard/cmd/wizard/main.go looks for "claude-observability-
+          # collector"[.exe] next to its own executable — the platform is
+          # already encoded in the zip's own filename below, so a suffix
+          # here would just make the wizard unable to find the collector
+          # after a user unzips both into the same folder.
+          go build -ldflags "-X main.version=${{ needs.compute-version.outputs.version }}" -o "claude-observability-wizard${ext}" ./cmd/wizard
 
       - name: build collector
         working-directory: src/collector
@@ -105,15 +111,15 @@ jobs:
         run: |
           ext=""
           if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
-          go build -ldflags "-X main.version=${{ needs.compute-version.outputs.version }}" -o "claude-observability-collector-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" ./cmd/collector
+          go build -ldflags "-X main.version=${{ needs.compute-version.outputs.version }}" -o "claude-observability-collector${ext}" ./cmd/collector
 
       - name: zip
         run: |
           ext=""
           if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
           zip -j "claude-observability-${{ matrix.goos }}-${{ matrix.goarch }}.zip" \
-            "src/wizard/claude-observability-wizard-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" \
-            "src/collector/claude-observability-collector-${{ matrix.goos }}-${{ matrix.goarch }}${ext}"
+            "src/wizard/claude-observability-wizard${ext}" \
+            "src/collector/claude-observability-collector${ext}"
 
       - uses: actions/upload-artifact@v4
         with:
