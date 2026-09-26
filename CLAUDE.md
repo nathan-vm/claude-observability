@@ -37,6 +37,55 @@ project does; this file is about how to work on it with Claude Code.
 - See `docs/superpowers/specs/2026-09-24-claude-multiagent-worktree-design.md`
   for the full design.
 
+## Testing against Loki
+
+There are two stacks on purpose. `docker-compose.yaml` is the real one
+(47xxx ports, the data you actually care about). `docker-compose.dev.yaml`
+is a standalone throwaway — 40xxx defaults, its own `name:` and volumes,
+and a `dash-generator` built from local source instead of the published
+image. A worktree's generated `docker-worktree.local` shifts the dev ports
+again so several worktrees can run at once.
+
+- **The 47xxx stack is read-only for testing.** Query it freely —
+  `curl -G .../loki/api/v1/query`, `query_range`, `labels`, `series`.
+  Reading real data is how you verify a LogQL change is actually correct,
+  and it is safe. Anything that *writes* belongs on the dev stack.
+- **`dash-generator` has no read-only mode.** `--once` runs a rate-publish
+  pass (`ratemeter.PublishRate`, which pushes EWMA points into Loki)
+  *before* generating dashboards, and `--dry-run` skips dashboard
+  generation entirely — so no flag combination generates without writing.
+  Never point it at 47100. With a fresh `STATE_FILE` it also backfills
+  `RATE_BACKFILL_DAYS` (14) of history, which is how ~8k stray rate points
+  once landed in the real Loki.
+- **`collector` writes too**: `PublishUsageTruth` pushes to Loki. To
+  exercise the `/usage` probe without writing anything, call
+  `usagetruth.FetchUsage` / `AccountEmail` directly from a test — they only
+  shell out to `claude` and parse the result.
+- **A fresh dev Loki generates zero dashboards.** `GenerateDashboards`
+  derives its account list from Loki itself (`discoverAccounts`), so an
+  empty instance produces nothing to inspect. Seed it first: read a slice
+  out of the real Loki with `query_range` and push that into the dev one.
+  Reading from real + writing to dev is the safe combination.
+- **Verify a dashboard query from the generated JSON, not from the
+  template.** Extract the panel's `expr` out of
+  `grafana/dashboards/accounts/*.json`, substitute `$account` and
+  `$__range`, and run it — retyping the query by hand cannot catch a
+  JSON-escaping slip, and no Go test covers the template's LogQL at all.
+  Assert an invariant you can state out loud: e.g. the weekly-breakdown
+  rows must sum to exactly the account's own `week_pct` when `$__range` is
+  `7d`.
+- **Structured metadata is part of query-time series identity.** `unwrap`
+  promotes it to result labels, so a bare
+  `sum(last_over_time({...} | unwrap week_pct [30m]))` fans out into one
+  series per distinct metadata combination and double-counts. Group
+  explicitly — `sum(last_over_time(...) by (user_email))`. Only put numeric
+  unwrap targets in metadata; free text belongs in the log line.
+- Tear the dev stack down with
+  `docker compose -f docker-compose.dev.yaml --env-file docker-worktree.local down -v`.
+  `-v` is safe and wanted there — which is exactly why it must never be
+  typed against `docker-compose.yaml`, where it wipes 90 days of metrics
+  with no confirmation.
+
 ## Multi-agent workflow
 
 For any non-trivial feature, fix, or refactor, invoke the `orchestrator`
