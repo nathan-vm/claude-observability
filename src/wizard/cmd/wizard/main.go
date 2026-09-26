@@ -163,6 +163,23 @@ func findRepoRoot() (string, error) {
 	return wd, nil
 }
 
+// shellRCPath returns the rc file this OS/shell combination uses for
+// persistent env vars, and which Shell syntax to render into it. Shared by
+// writeShellConfig (writing) and resolveExporterStream (peeking at an
+// existing value before writing) so both always agree on which file "this
+// run" means.
+func shellRCPath(home string) (path string, shell envwriter.Shell) {
+	shellName := filepath.Base(os.Getenv("SHELL"))
+	switch shellName {
+	case "fish":
+		return filepath.Join(home, ".config", "fish", "config.fish"), envwriter.Fish
+	case "zsh":
+		return filepath.Join(home, ".zshrc"), envwriter.Bash
+	default:
+		return filepath.Join(home, ".bashrc"), envwriter.Bash
+	}
+}
+
 func writeShellConfig(out *os.File, home string, vars []envwriter.Var) error {
 	if runtime.GOOS == "windows" {
 		return envwriter.WriteWindows(vars, func(name, value string) error {
@@ -170,20 +187,7 @@ func writeShellConfig(out *os.File, home string, vars []envwriter.Var) error {
 		})
 	}
 
-	shellName := filepath.Base(os.Getenv("SHELL"))
-	var path string
-	var shell envwriter.Shell
-	switch shellName {
-	case "fish":
-		path = filepath.Join(home, ".config", "fish", "config.fish")
-		shell = envwriter.Fish
-	case "zsh":
-		path = filepath.Join(home, ".zshrc")
-		shell = envwriter.Bash
-	default:
-		path = filepath.Join(home, ".bashrc")
-		shell = envwriter.Bash
-	}
+	path, shell := shellRCPath(home)
 
 	wrote, err := envwriter.WriteBlock(path, shell, vars)
 	if err != nil {
@@ -195,6 +199,21 @@ func writeShellConfig(out *os.File, home string, vars []envwriter.Var) error {
 		fmt.Fprintf(out, "  already present in %s (edit the block by hand to change accounts)\n", path)
 	}
 	return nil
+}
+
+// resolveExporterStreamValue returns existing unchanged if it's non-empty
+// (an already-configured install's stream id, found by resolveExporterStream
+// below), or mints a fresh "claude-code-exporter-<uuid>" value otherwise (a
+// genuinely new install).
+func resolveExporterStreamValue(existing string) (string, error) {
+	if existing != "" {
+		return existing, nil
+	}
+	id, err := streamid.New()
+	if err != nil {
+		return "", err
+	}
+	return "claude-code-exporter-" + id, nil
 }
 
 func installCollectorService(repoRoot string, collectorVars []envwriter.Var) error {
