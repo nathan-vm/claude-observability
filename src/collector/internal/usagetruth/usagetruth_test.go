@@ -2,6 +2,7 @@ package usagetruth
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -254,42 +255,70 @@ func TestAccountEmail_DoesNotPassMCPConfigFlags(t *testing.T) {
 	}
 }
 
+// TestKillProcessGroup_AlreadyExitedReturnsErrProcessDone pins the
+// os/exec Cmd.Cancel contract directly and deterministically, rather than
+// racing a timeout against a fast-exiting real `claude` process end to
+// end: killProcessGroup must map "group already gone" (ESRCH) to
+// os.ErrProcessDone, the only sentinel Cmd.Cancel's contract treats as
+// "not a real Cancel failure" — a raw ESRCH would otherwise turn an
+// already-successful run into a spurious Wait() error.
+func TestKillProcessGroup_AlreadyExitedReturnsErrProcessDone(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process-group kill is POSIX-specific; see proc_windows.go")
+	}
+	cmd := exec.Command("true")
+	setNewProcessGroup(cmd)
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := killProcessGroup(cmd); !errors.Is(err, os.ErrProcessDone) {
+		t.Errorf("killProcessGroup() on an already-reaped process = %v, want an error satisfying errors.Is(err, os.ErrProcessDone)", err)
+	}
+}
+
 func TestRunClaudeWithTimeout_KillsGrandchildProcessGroup(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("process-group kill is POSIX-specific; see proc_windows.go")
 	}
 	dir := t.TempDir()
 	heartbeat := filepath.Join(dir, "heartbeat")
-	// The fixture backgrounds a loop that writes a fresh heartbeat every
-	// ~50ms — simulating a grandchild like `docker run` that a plain
+	// The fixture backgrounds a loop that appends one line every ~20ms —
+	// simulating a grandchild like `docker run` that a plain
 	// cmd.Process.Kill() (direct child only) would leave running — then
 	// blocks in the foreground well past the test's short timeout, so the
 	// only thing that can end this script is our own timeout-triggered
-	// group kill.
+	// group kill. A shell-builtin line count, not a `date +%N` timestamp:
+	// BSD/macOS date has no nanosecond field, and counting lines instead of
+	// comparing wall-clock content also avoids forking an external `date`
+	// binary per iteration, which is what made the first heartbeat arrive
+	// late enough to make a short timeout flaky here.
 	script := "#!/bin/sh\n" +
-		`( while true; do date +%s%N > ` + heartbeat + `; sleep 0.05; done ) &` + "\n" +
+		`( i=0; while true; do i=$((i+1)); echo $i >> ` + heartbeat + `; sleep 0.02; done ) &` + "\n" +
 		"sleep 30\n"
 	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	_, err := runClaudeWithTimeout("/tmp/cfg", 2*time.Second)
+	_, err := runClaudeWithTimeout("/tmp/cfg", 1*time.Second)
 	if err == nil {
 		t.Fatal("want a timeout error")
 	}
 
-	readHeartbeat := func() []byte {
+	lineCount := func() int {
 		b, _ := os.ReadFile(heartbeat)
-		return b
+		if len(b) == 0 {
+			return 0
+		}
+		return len(strings.Split(strings.TrimSpace(string(b)), "\n"))
 	}
-	first := readHeartbeat()
-	if len(first) == 0 {
+	first := lineCount()
+	if first == 0 {
 		t.Fatal("grandchild never started heartbeating — fixture didn't run as expected")
 	}
-	time.Sleep(1 * time.Second) // well past the 50ms heartbeat interval
-	second := readHeartbeat()
-	if string(first) != string(second) {
-		t.Errorf("heartbeat still advancing after timeout (%q -> %q); want the grandchild to have died with the process group, not outlived it", first, second)
+	time.Sleep(500 * time.Millisecond) // well past the 20ms heartbeat interval
+	second := lineCount()
+	if first != second {
+		t.Errorf("heartbeat still advancing after timeout (%d -> %d lines); want the grandchild to have died with the process group, not outlived it", first, second)
 	}
 }

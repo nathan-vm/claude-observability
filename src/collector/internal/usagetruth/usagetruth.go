@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"claude-observability-collector/internal/lokiclient"
@@ -30,19 +31,36 @@ const claudeTimeout = 30 * time.Second
 // of that fix).
 const emptyMCPConfig = `{"mcpServers":{}}`
 
-// writeEmptyMCPConfigFile (re)writes emptyMCPConfig to a fixed path under
-// os.TempDir() and returns that path. A file path, not an inline JSON
-// string: --mcp-config's help text only documents "JSON files", and a path
-// sidesteps the question of whether an inline string is also accepted.
-// Rewritten unconditionally on every call rather than cached — the content
-// is static and the write is a few bytes, far cheaper than the bug this
-// exists to avoid.
+var (
+	mcpConfigOnce sync.Once
+	mcpConfigPath string
+	mcpConfigErr  error
+)
+
+// writeEmptyMCPConfigFile writes emptyMCPConfig once per process to a
+// fixed filename inside a freshly created, mode-0700, randomly named
+// directory (via os.MkdirTemp) and returns that path on every call. A
+// fixed, predictable path under the shared os.TempDir() would let another
+// local user on a host with a world-writable /tmp pre-create a symlink
+// there — os.WriteFile follows symlinks — and silently redirect/truncate
+// an arbitrary target on every poll. The random directory name defeats
+// pre-creation and the 0700 mode locks out other users entirely, without
+// resorting to a platform-specific O_NOFOLLOW open.
 func writeEmptyMCPConfigFile() (string, error) {
-	path := filepath.Join(os.TempDir(), "claude-observability-empty-mcp-config.json")
-	if err := os.WriteFile(path, []byte(emptyMCPConfig), 0o644); err != nil {
-		return "", fmt.Errorf("writing empty MCP config: %w", err)
-	}
-	return path, nil
+	mcpConfigOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "claude-observability-mcp-config-*")
+		if err != nil {
+			mcpConfigErr = fmt.Errorf("creating empty MCP config dir: %w", err)
+			return
+		}
+		path := filepath.Join(dir, "empty-mcp-config.json")
+		if err := os.WriteFile(path, []byte(emptyMCPConfig), 0o600); err != nil {
+			mcpConfigErr = fmt.Errorf("writing empty MCP config: %w", err)
+			return
+		}
+		mcpConfigPath = path
+	})
+	return mcpConfigPath, mcpConfigErr
 }
 
 // Usage is one account's current session/week percentages and Anthropic's
@@ -137,14 +155,14 @@ func parseUsage(text string) (Usage, error) {
 // the rest of /usage's output is explicitly scoped by Anthropic to "local
 // sessions on this machine".
 func FetchUsage(configDir string) (Usage, error) {
-	mcpConfigPath, err := writeEmptyMCPConfigFile()
+	configPath, err := writeEmptyMCPConfigFile()
 	if err != nil {
 		return Usage{}, err
 	}
 	// Flag order matters: --mcp-config is variadic and greedily consumes
 	// following bare words, so -p must come immediately after the path.
 	out, err := runClaude(configDir,
-		"--strict-mcp-config", "--mcp-config", mcpConfigPath,
+		"--strict-mcp-config", "--mcp-config", configPath,
 		"-p", "/usage", "--output-format", "json", "--no-session-persistence")
 	if err != nil {
 		return Usage{}, err
