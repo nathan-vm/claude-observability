@@ -205,16 +205,31 @@ func FetchUsage(configDir string) (Usage, error) {
 
 func publish(lokiURL, email string, usage Usage) error {
 	nowMs := time.Now().UnixMilli()
+	// The reset-text wording is free-form and drifts wall-clock to
+	// wall-clock (e.g. "resets Sep 26 at 1:59pm" vs "resets Sep 26 at
+	// 2pm" for the same underlying window), so it goes in the line body,
+	// not Metadata — never JSON-decode-failing since it's our own
+	// marshal.
+	line, _ := json.Marshal(struct {
+		SessionResetText string `json:"session_reset_text"`
+		WeekResetText    string `json:"week_reset_text"`
+	}{SessionResetText: usage.SessionReset, WeekResetText: usage.WeekReset})
 	return lokiclient.Push(lokiURL, []lokiclient.Stream{{
 		Labels: map[string]string{"service_name": "claude-code-usage-truth", "user_email": email},
 		Values: []lokiclient.StreamValue{{
 			TimestampNs: strconv.FormatInt(nowMs, 10) + "000000",
-			Line:        "usage-truth",
+			Line:        string(line),
+			// Loki structured metadata is promoted to result-series
+			// labels by `unwrap` at query time, so only the numeric
+			// fields the dashboards actually unwrap belong here — a
+			// free-text field (like the reset-text wording used to be)
+			// fans one logical series into one result series per
+			// distinct wording, silently multiplying sum()/
+			// last_over_time() results across whatever wordings land in
+			// the query window.
 			Metadata: map[string]string{
-				"session_pct":        strconv.Itoa(usage.SessionPct),
-				"session_reset_text": usage.SessionReset,
-				"week_pct":           strconv.Itoa(usage.WeekPct),
-				"week_reset_text":    usage.WeekReset,
+				"session_pct": strconv.Itoa(usage.SessionPct),
+				"week_pct":    strconv.Itoa(usage.WeekPct),
 			},
 		}},
 	}})

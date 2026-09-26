@@ -152,6 +152,110 @@ func TestPublishUsageTruth_PublishesOneLinePerLoggedInAccount(t *testing.T) {
 	}
 }
 
+func TestWriteEmptyMCPConfigFile_ReusesDirWhenPresent(t *testing.T) {
+	path1, err := writeEmptyMCPConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path2, err := writeEmptyMCPConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path1 != path2 {
+		t.Errorf("path1 = %q, path2 = %q, want the same path when nothing removed it", path1, path2)
+	}
+}
+
+func TestWriteEmptyMCPConfigFile_SelfHealsWhenDirectoryRemoved(t *testing.T) {
+	path1, err := writeEmptyMCPConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldDir := filepath.Dir(path1)
+	if err := os.RemoveAll(oldDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulates the directory vanishing underneath a long-running
+	// process (e.g. systemd-tmpfiles-clean) — must recreate and retry,
+	// never latch the resulting dangling path or an error forever.
+	path2, err := writeEmptyMCPConfigFile()
+	if err != nil {
+		t.Fatalf("writeEmptyMCPConfigFile did not self-heal after its directory vanished: %v", err)
+	}
+	if _, err := os.Stat(path2); err != nil {
+		t.Fatalf("path2 %q not created after healing: %v", path2, err)
+	}
+	if _, err := os.Stat(oldDir); err == nil {
+		t.Errorf("old directory %q still exists after healing; want it removed so repeated healing can't accumulate directories", oldDir)
+	}
+	content, err := os.ReadFile(path2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != emptyMCPConfig {
+		t.Errorf("content = %q, want %q", content, emptyMCPConfig)
+	}
+}
+
+func TestPublish_PutsResetTextInLineBodyNotMetadata(t *testing.T) {
+	var pushed map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&pushed)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	usage := Usage{
+		SessionPct:   13,
+		SessionReset: "resets Sep 22 at 8:39pm (America/Sao_Paulo)",
+		WeekPct:      42,
+		WeekReset:    "resets Sep 24 at 7:59pm (America/Sao_Paulo)",
+	}
+	if err := publish(srv.URL, "a@example.com", usage); err != nil {
+		t.Fatal(err)
+	}
+
+	streams, _ := pushed["streams"].([]interface{})
+	if len(streams) != 1 {
+		t.Fatalf("pushed = %v", pushed)
+	}
+	values, _ := streams[0].(map[string]interface{})["values"].([]interface{})
+	if len(values) != 1 {
+		t.Fatalf("values = %v", values)
+	}
+	entry, _ := values[0].([]interface{})
+	if len(entry) != 3 {
+		t.Fatalf("entry = %v, want [timestamp, line, metadata]", entry)
+	}
+
+	// Structured metadata (Loki's `unwrap` target set): numeric fields
+	// only. A free-text field here would fan one logical series into one
+	// result series per distinct wording at query time — see the comment
+	// at publish's Metadata map.
+	metadata, _ := entry[2].(map[string]interface{})
+	if len(metadata) != 2 || metadata["session_pct"] != "13" || metadata["week_pct"] != "42" {
+		t.Errorf("metadata = %v, want exactly session_pct=13, week_pct=42", metadata)
+	}
+	for _, forbidden := range []string{"session_reset_text", "week_reset_text"} {
+		if _, ok := metadata[forbidden]; ok {
+			t.Errorf("metadata contains %q, want reset text out of structured metadata", forbidden)
+		}
+	}
+
+	line, _ := entry[1].(string)
+	var body struct {
+		SessionResetText string `json:"session_reset_text"`
+		WeekResetText    string `json:"week_reset_text"`
+	}
+	if err := json.Unmarshal([]byte(line), &body); err != nil {
+		t.Fatalf("line body %q not JSON: %v", line, err)
+	}
+	if body.SessionResetText != usage.SessionReset || body.WeekResetText != usage.WeekReset {
+		t.Errorf("line body = %+v, want reset texts %q / %q", body, usage.SessionReset, usage.WeekReset)
+	}
+}
+
 func TestPublishUsageTruth_SkipsNotLoggedInWithoutError(t *testing.T) {
 	fakeClaudeOnPath(t, `echo '{"loggedIn":false}'`)
 	err := PublishUsageTruth("http://unused.invalid", []string{"/tmp/cfg"}, t.Logf)
@@ -252,52 +356,6 @@ func TestAccountEmail_DoesNotPassMCPConfigFlags(t *testing.T) {
 	// file paths, failing the command outright. Verified live.
 	if strings.Contains(string(seenArgs), "--mcp-config") {
 		t.Errorf("args = %q, auth status must not receive --mcp-config", seenArgs)
-	}
-}
-
-func TestWriteEmptyMCPConfigFile_ReusesDirWhenPresent(t *testing.T) {
-	path1, err := writeEmptyMCPConfigFile()
-	if err != nil {
-		t.Fatal(err)
-	}
-	path2, err := writeEmptyMCPConfigFile()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if path1 != path2 {
-		t.Errorf("path1 = %q, path2 = %q, want the same path when nothing removed it", path1, path2)
-	}
-}
-
-func TestWriteEmptyMCPConfigFile_SelfHealsWhenDirectoryRemoved(t *testing.T) {
-	path1, err := writeEmptyMCPConfigFile()
-	if err != nil {
-		t.Fatal(err)
-	}
-	oldDir := filepath.Dir(path1)
-	if err := os.RemoveAll(oldDir); err != nil {
-		t.Fatal(err)
-	}
-
-	// Simulates the directory vanishing underneath a long-running
-	// process (e.g. systemd-tmpfiles-clean) — must recreate and retry,
-	// never latch the resulting dangling path or an error forever.
-	path2, err := writeEmptyMCPConfigFile()
-	if err != nil {
-		t.Fatalf("writeEmptyMCPConfigFile did not self-heal after its directory vanished: %v", err)
-	}
-	if _, err := os.Stat(path2); err != nil {
-		t.Fatalf("path2 %q not created after healing: %v", path2, err)
-	}
-	if _, err := os.Stat(oldDir); err == nil {
-		t.Errorf("old directory %q still exists after healing; want it removed so repeated healing can't accumulate directories", oldDir)
-	}
-	content, err := os.ReadFile(path2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(content) != emptyMCPConfig {
-		t.Errorf("content = %q, want %q", content, emptyMCPConfig)
 	}
 }
 
