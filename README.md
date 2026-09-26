@@ -162,18 +162,6 @@ gets its own dashboard. Accounts you don't pick go on the `ignore` list in
 `grafana/account-limits.json`, so they don't show up as empty dashboards
 the moment they send telemetry.
 
-### Setting your limit
-
-Anthropic doesn't expose your plan's token limit through telemetry, so you
-set it yourself, per account, in `grafana/account-limits.json` (gitignored
-— it contains emails). Copy the template to create it:
-
-```sh
-cp grafana/account-limits.example.json grafana/account-limits.json
-```
-
-See [How do I set my token limit?](#faq) for how to calibrate the number.
-
 ## Dashboards
 
 One dashboard per account, generated automatically by dash-generator every
@@ -187,7 +175,7 @@ still spend* → *where is it going* → *is my rate high right now*:
 | Section | Answers |
 |---|---|
 | **Overview** | % of the 5-hour and weekly limit used, straight from `/usage` |
-| **Weekly breakdown** | The week's consumption by model, effort, source, and skill |
+| **Weekly breakdown** | The week's consumption by model, effort, source, and skill, each row's share of your weekly limit scaled from /usage's real percentage |
 | **Skills and tools** | Which skill or MCP server consumes the most, with drill-downs |
 | **Consumption rate** | Tokens/hour right now, against your own historical pace |
 | **Time range picker** | Defaults to the current week — skill/MCP activity is sparse, so a single day is often empty |
@@ -261,13 +249,13 @@ Each account has its own MCP servers, plugins, and limit. Summed numbers
 across accounts wouldn't answer a real question, so the stack deliberately
 doesn't generate one.
 
-**How do I set my token limit?**
-Run `/usage` on the account and note the percentage it reports. Compare
-that to what the collector already published for the account (it's
-already calling `/usage` on the same schedule), and solve:
-`limit = observed_tokens / (usage_percentage / 100)`. Set the result in
-`grafana/account-limits.json`. Accounts with no entry fall back to a
-hardcoded default in `src/dash-generator/internal/dashboardgen`.
+**How is the Weekly breakdown's percentage column computed, if there's no configured limit anymore?**
+Each row's tokens (input + output + cache creation, over the selected time
+range) are weighted by that row's share of the account's trailing 7-day
+token total, then scaled by the real `week_pct` that `/usage` reports. Set
+the range to 7 days and the rows sum to exactly `week_pct`. There's nothing
+to calibrate by hand — see the panel's own description in Grafana for the
+proportionality assumption it makes.
 
 **Why doesn't the weekly window just use a rolling 7-day sum?**
 Each account's reset day and hour is personal, not a global default —

@@ -256,10 +256,8 @@ func TestScopeAccount_ReplacesAllPlaceholders(t *testing.T) {
 		Input:  Cutlines{P75: 10, Outlier: 20, Extreme: 30},
 		Output: Cutlines{P75: 5, Outlier: 15, Extreme: 25},
 	}
-	limits := AccountLimits{Block5h: 1_750_000, Week: 21_500_000}
-
 	dashboard, err := scopeAccount(template, "a@example.com", cutlines, []string{"github"},
-		[]Option{{Text: "superpowers", Value: "superpowers"}}, limits, "claude-code-exporter-1", "20m")
+		[]Option{{Text: "superpowers", Value: "superpowers"}}, "claude-code-exporter-1", "20m")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,36 +294,13 @@ func TestScopeAccount_OriginalTemplateUntouched(t *testing.T) {
 	original, _ := json.Marshal(template)
 
 	cutlines := AllCutlines{Total: Cutlines{P75: 1, Outlier: 2, Extreme: 3}}
-	_, err := scopeAccount(template, "a@example.com", cutlines, nil, nil, AccountLimits{}, "s", "20m")
+	_, err := scopeAccount(template, "a@example.com", cutlines, nil, nil, "s", "20m")
 	if err != nil {
 		t.Fatal(err)
 	}
 	after, _ := json.Marshal(template)
 	if string(original) != string(after) {
 		t.Error("scopeAccount mutated the shared template — must deep-clone first")
-	}
-}
-
-func TestLimitsFor_FallsBackThroughDefaultThenAccount(t *testing.T) {
-	doc := map[string]interface{}{
-		"default":  map[string]interface{}{"block_5h": float64(111), "week": float64(222)},
-		"accounts": map[string]interface{}{"a@example.com": map[string]interface{}{"block_5h": float64(999)}},
-	}
-	got := limitsFor(doc, "a@example.com")
-	if got.Block5h != 999 || got.Week != 222 {
-		t.Errorf("got %+v, want block_5h from account, week from default", got)
-	}
-
-	gotOther := limitsFor(doc, "nobody@example.com")
-	if gotOther.Block5h != 111 || gotOther.Week != 222 {
-		t.Errorf("got %+v for unconfigured account, want the default block", gotOther)
-	}
-}
-
-func TestLimitsFor_HardcodedFallbackWhenNoDefaultEither(t *testing.T) {
-	got := limitsFor(map[string]interface{}{}, "a@example.com")
-	if got.Block5h != 1_750_000 || got.Week != 21_500_000 {
-		t.Errorf("got %+v, want hardcoded fallback", got)
 	}
 }
 
