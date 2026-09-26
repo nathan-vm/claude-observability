@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.4] - 2026-09-26
+
+### Fixed
+- fix: stop usage-truth probes from booting MCP servers and leaking containers (#9)
+
 ## [0.1.3] - 2026-09-26
 
 ### Fixed
