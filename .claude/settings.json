@@ -33,6 +33,19 @@
           }
         ]
       }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/block-prod-loki-writes.sh",
+            "statusMessage": "Checking for prod Loki writes...",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }
