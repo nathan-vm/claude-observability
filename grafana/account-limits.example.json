@@ -4,27 +4,16 @@
     "versioned because it contains email addresses (same rule as the .gitignore",
     "entry for grafana/dashboards/accounts/).",
     "",
-    "Limit references per account, in NEW TOKENS (input + output + cache creation).",
-    "Anthropic does not expose the limit through any telemetry, and it varies by",
-    "plan — hence per account rather than a single number.",
+    "'ignore': accounts that should not get a dashboard. Useful for a",
+    "deactivated or third-party account that still shows up in old Loki data",
+    "until retention expires.",
     "",
-    "PURELY USER-SET — there is no automatic calibration. Accounts with no entry",
-    "under 'accounts' fall back to the 'default' block. See README.md, 'The",
-    "limit references', for how to calibrate by hand against /usage.",
-    "",
-    "'ignore': accounts that should not get a dashboard. Useful for a deactivated",
-    "or third-party account that still shows up in old Loki data until retention",
-    "expires."
+    "There used to be per-account token-limit fields here ('default' and",
+    "'accounts', with block_5h/week). Removed: the Weekly breakdown table's",
+    "percentages are derived from /usage's own week_pct now, so there is",
+    "nothing left to calibrate by hand. An account-limits.json created before",
+    "this change can still carry those fields — dash-generator ignores them",
+    "and reads only 'ignore'."
   ],
-  "default": {
-    "block_5h": 1750000,
-    "week": 21500000
-  },
-  "accounts": {
-    "you@example.com": {
-      "block_5h": 1750000,
-      "week": 21500000
-    }
-  },
   "ignore": []
 }
