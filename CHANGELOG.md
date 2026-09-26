@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.5] - 2026-09-26
+
+### Fixed
+- fix: derive Weekly breakdown percentages from /usage instead of a configured limit (#10)
+
 ## [0.1.4] - 2026-09-26
 
 ### Fixed
