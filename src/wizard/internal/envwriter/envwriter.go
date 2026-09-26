@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -86,4 +87,36 @@ func WriteWindows(vars []Var, run func(name, value string) error) error {
 		}
 	}
 	return nil
+}
+
+// ExistingVar reports the value already assigned to name inside path's
+// Marker block, if any. ok is false — with err nil — when: path doesn't
+// exist yet (nothing configured); path exists but has no Marker block yet
+// (nothing configured); or the Marker block exists but never assigned name
+// (e.g. an accounts-less first run wrote the telemetry vars but had no
+// collector vars to write yet). Any other read error is returned as err.
+func ExistingVar(path string, shell Shell, name string) (value string, ok bool, err error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	if !strings.Contains(string(data), Marker) {
+		return "", false, nil
+	}
+
+	var pattern *regexp.Regexp
+	switch shell {
+	case Fish:
+		pattern = regexp.MustCompile(`(?m)^set -gx ` + regexp.QuoteMeta(name) + ` (.+)$`)
+	default:
+		pattern = regexp.MustCompile(`(?m)^export ` + regexp.QuoteMeta(name) + `="(.*)"$`)
+	}
+	m := pattern.FindStringSubmatch(string(data))
+	if m == nil {
+		return "", false, nil
+	}
+	return m[1], true, nil
 }

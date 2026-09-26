@@ -103,3 +103,82 @@ func TestWriteWindows_PropagatesError(t *testing.T) {
 		t.Error("WriteWindows() = nil, want error")
 	}
 }
+
+func TestExistingVar_ReturnsValueWhenPresent_Bash(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rc")
+	if _, err := WriteBlock(path, Bash, []Var{{"EXPORTER_STREAM", "claude-code-exporter-abc123"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	value, ok, err := ExistingVar(path, Bash, "EXPORTER_STREAM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || value != "claude-code-exporter-abc123" {
+		t.Errorf("ExistingVar() = (%q, %v), want (\"claude-code-exporter-abc123\", true)", value, ok)
+	}
+}
+
+func TestExistingVar_ReturnsValueWhenPresent_Fish(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.fish")
+	if _, err := WriteBlock(path, Fish, []Var{{"EXPORTER_STREAM", "claude-code-exporter-abc123"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	value, ok, err := ExistingVar(path, Fish, "EXPORTER_STREAM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || value != "claude-code-exporter-abc123" {
+		t.Errorf("ExistingVar() = (%q, %v), want (\"claude-code-exporter-abc123\", true)", value, ok)
+	}
+}
+
+func TestExistingVar_FalseWhenFileMissing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "does-not-exist")
+
+	_, ok, err := ExistingVar(path, Bash, "EXPORTER_STREAM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Error("ok = true, want false for a missing file")
+	}
+}
+
+func TestExistingVar_FalseWhenMarkerMissing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rc")
+	if err := os.WriteFile(path, []byte("export SOMETHING_ELSE=\"1\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, ok, err := ExistingVar(path, Bash, "EXPORTER_STREAM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Error("ok = true, want false when the file has no Marker block at all")
+	}
+}
+
+func TestExistingVar_FalseWhenBlockExistsButVarMissing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rc")
+	// Simulates an accounts-less first run: the Marker block exists (from
+	// telemetry vars) but EXPORTER_STREAM was never written.
+	if _, err := WriteBlock(path, Bash, []Var{{"CLAUDE_CODE_ENABLE_TELEMETRY", "1"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, ok, err := ExistingVar(path, Bash, "EXPORTER_STREAM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Error("ok = true, want false when the Marker block exists but never assigned this var")
+	}
+}

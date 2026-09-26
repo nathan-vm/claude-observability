@@ -100,17 +100,15 @@ func run() error {
 			}
 			collectorVars = append(collectorVars, envwriter.Var{Name: "CLAUDE_OBSERVABILITY_EXTRA_DIRS", Value: extra})
 		}
-		// A random id per install rather than a shared sequential counter —
-		// see internal/streamid. Discarded on a re-run: WriteBlock below is
-		// a no-op once the marker exists, so this only ever takes effect
-		// the first time (on Windows, WriteWindows has no such marker and
-		// setx always overwrites, so a re-run there does mint a new one —
-		// same as it already does for CLAUDE_DIR today).
-		id, err := streamid.New()
+		// See resolveExporterStream: reuses this install's existing
+		// EXPORTER_STREAM if one is already configured, so a wizard re-run
+		// never orphans the collector's existing Loki stream. Only mints a
+		// fresh id (internal/streamid) for a genuinely new install.
+		streamValue, err := resolveExporterStream(home)
 		if err != nil {
 			return err
 		}
-		collectorVars = append(collectorVars, envwriter.Var{Name: "EXPORTER_STREAM", Value: "claude-code-exporter-" + id})
+		collectorVars = append(collectorVars, envwriter.Var{Name: "EXPORTER_STREAM", Value: streamValue})
 	}
 
 	allVars := append(append([]envwriter.Var{}, telemetryVars...), collectorVars...)
@@ -163,6 +161,23 @@ func findRepoRoot() (string, error) {
 	return wd, nil
 }
 
+// shellRCPath returns the rc file this OS/shell combination uses for
+// persistent env vars, and which Shell syntax to render into it. Shared by
+// writeShellConfig (writing) and resolveExporterStream (peeking at an
+// existing value before writing) so both always agree on which file "this
+// run" means.
+func shellRCPath(home string) (path string, shell envwriter.Shell) {
+	shellName := filepath.Base(os.Getenv("SHELL"))
+	switch shellName {
+	case "fish":
+		return filepath.Join(home, ".config", "fish", "config.fish"), envwriter.Fish
+	case "zsh":
+		return filepath.Join(home, ".zshrc"), envwriter.Bash
+	default:
+		return filepath.Join(home, ".bashrc"), envwriter.Bash
+	}
+}
+
 func writeShellConfig(out *os.File, home string, vars []envwriter.Var) error {
 	if runtime.GOOS == "windows" {
 		return envwriter.WriteWindows(vars, func(name, value string) error {
@@ -170,20 +185,7 @@ func writeShellConfig(out *os.File, home string, vars []envwriter.Var) error {
 		})
 	}
 
-	shellName := filepath.Base(os.Getenv("SHELL"))
-	var path string
-	var shell envwriter.Shell
-	switch shellName {
-	case "fish":
-		path = filepath.Join(home, ".config", "fish", "config.fish")
-		shell = envwriter.Fish
-	case "zsh":
-		path = filepath.Join(home, ".zshrc")
-		shell = envwriter.Bash
-	default:
-		path = filepath.Join(home, ".bashrc")
-		shell = envwriter.Bash
-	}
+	path, shell := shellRCPath(home)
 
 	wrote, err := envwriter.WriteBlock(path, shell, vars)
 	if err != nil {
@@ -195,6 +197,69 @@ func writeShellConfig(out *os.File, home string, vars []envwriter.Var) error {
 		fmt.Fprintf(out, "  already present in %s (edit the block by hand to change accounts)\n", path)
 	}
 	return nil
+}
+
+// resolveExporterStreamValue returns existing unchanged if it's non-empty
+// (an already-configured install's stream id, found by resolveExporterStream
+// below), or mints a fresh "claude-code-exporter-<uuid>" value otherwise (a
+// genuinely new install).
+func resolveExporterStreamValue(existing string) (string, error) {
+	if existing != "" {
+		return existing, nil
+	}
+	id, err := streamid.New()
+	if err != nil {
+		return "", err
+	}
+	return "claude-code-exporter-" + id, nil
+}
+
+// resolveExporterStream returns the EXPORTER_STREAM value this run should
+// use: the id already committed for this install, if one is found, so a
+// wizard re-run never orphans the collector's existing Loki stream — a
+// fresh id (see resolveExporterStreamValue) is minted only when none is
+// found, i.e. a genuinely new install.
+//
+// On Unix, the source of truth is the shell rc file this run would write to
+// (shellRCPath) — not the installed collector service definition (launchd
+// plist / systemd unit), even though that's what actually determines the
+// running collector's env: the service definition is exactly the artifact
+// this bug corrupts, so trusting it as a source would perpetuate any
+// existing drift instead of healing it. The shell rc file is also literally
+// what a manual `docker compose up` reads EXPORTER_STREAM from at
+// compose-up time, so it's the more authoritative side to trust anyway. A
+// side effect: running this fixed wizard on a machine that already drifted
+// (mismatched shell rc vs. service definition, from a prior buggy run)
+// re-derives the correct id from the shell rc and rewrites the service
+// definition back into agreement.
+//
+// On Windows there's no persisted marker file (envwriter.WriteWindows calls
+// `setx`, which always overwrites and keeps no marker — see envwriter), so
+// the only available signal is this process's own environment: reused if
+// the current session already picked up a prior `setx` (true once the user
+// has opened a new terminal since installing), minted fresh otherwise — the
+// same reload caveat CLAUDE_DIR already has today on Windows.
+//
+// Not handled, pre-existing and unchanged by this fix: switching shells
+// between wizard runs (e.g. bash -> fish) writes a second, separate rc
+// block with its own fresh id, same as it always has; and an accounts-less
+// first run (no CLAUDE_DIR/EXPORTER_STREAM ever written, since
+// collectorVars is only populated when len(chosen) > 0) is treated as
+// "nothing to reuse yet" the first time accounts are later found — correct,
+// since the collector is only being configured for the first time then.
+func resolveExporterStream(home string) (string, error) {
+	if runtime.GOOS == "windows" {
+		return resolveExporterStreamValue(os.Getenv("EXPORTER_STREAM"))
+	}
+	path, shell := shellRCPath(home)
+	existing, ok, err := envwriter.ExistingVar(path, shell, "EXPORTER_STREAM")
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		existing = ""
+	}
+	return resolveExporterStreamValue(existing)
 }
 
 func installCollectorService(repoRoot string, collectorVars []envwriter.Var) error {
