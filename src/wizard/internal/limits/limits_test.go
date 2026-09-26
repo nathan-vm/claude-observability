@@ -26,12 +26,12 @@ func TestUpdate_CreatesFromExampleIfMissing(t *testing.T) {
 	if len(ignore) != 1 || ignore[0] != "a@example.com" {
 		t.Errorf("ignore = %v, want [a@example.com]", ignore)
 	}
-	accounts := doc["accounts"].(map[string]interface{})
-	if len(accounts) != 0 {
-		t.Errorf("accounts = %v, want empty (cleared)", accounts)
-	}
 	if _, ok := doc["default"]; !ok {
 		t.Error("default field not preserved")
+	}
+	accounts := doc["accounts"].(map[string]interface{})
+	if _, ok := accounts["x@example.com"]; !ok {
+		t.Errorf("accounts = %v, want untouched from example (not cleared)", accounts)
 	}
 }
 
@@ -70,5 +70,9 @@ func TestUpdate_PreservesOtherFields(t *testing.T) {
 	def := doc["default"].(map[string]interface{})
 	if def["block_5h"].(float64) != 99 {
 		t.Error("default.block_5h not preserved")
+	}
+	accounts := doc["accounts"].(map[string]interface{})
+	if _, ok := accounts["old@example.com"]; !ok {
+		t.Errorf("accounts = %v, want untouched (old-shape field left alone)", accounts)
 	}
 }

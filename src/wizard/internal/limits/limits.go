@@ -8,9 +8,9 @@ import (
 )
 
 // Update sets the "ignore" field of the JSON file at path to ignored
-// (deduped, skipping empty strings) and clears "accounts" to an empty
-// object, preserving every other top-level field untouched. If path
-// doesn't exist, it's first created as a copy of examplePath.
+// (deduped, skipping empty strings), preserving every other top-level
+// field untouched. If path doesn't exist, it's first created as a copy of
+// examplePath.
 func Update(path, examplePath string, ignored []string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -38,7 +38,6 @@ func Update(path, examplePath string, ignored []string) error {
 		deduped = append(deduped, email)
 	}
 	doc["ignore"] = deduped
-	doc["accounts"] = map[string]interface{}{}
 
 	out, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
