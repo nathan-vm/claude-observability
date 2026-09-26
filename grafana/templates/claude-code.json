@@ -103,28 +103,6 @@
         "hide": 0
       },
       {
-        "name": "limit_tokens_5h",
-        "label": "Token reference (5h block)",
-        "type": "textbox",
-        "query": "1750000",
-        "current": {
-          "text": "1750000",
-          "value": "1750000"
-        },
-        "hide": 2
-      },
-      {
-        "name": "limit_tokens_week",
-        "label": "Token reference (week)",
-        "type": "textbox",
-        "query": "21500000",
-        "current": {
-          "text": "21500000",
-          "value": "21500000"
-        },
-        "hide": 2
-      },
-      {
         "name": "skill",
         "type": "textbox",
         "hide": 2,
@@ -164,7 +142,7 @@
     {
       "id": 1,
       "type": "gauge",
-      "title": "5h block limit \u2014 % used",
+      "title": "5h block \u2014 % used (from /usage)",
       "datasource": {
         "type": "loki",
         "uid": "loki"
@@ -172,7 +150,7 @@
       "gridPos": {
         "x": 0,
         "y": 1,
-        "w": 5,
+        "w": 6,
         "h": 6
       },
       "targets": [
@@ -232,20 +210,21 @@
         "minVizWidth": 75,
         "minVizHeight": 75,
         "sizing": "auto"
-      }
+      },
+      "description": "The real number from Anthropic's own /usage command (src/collector/internal/usagetruth), not something derived from OTel token counts."
     },
     {
       "id": 2,
       "type": "gauge",
-      "title": "Weekly limit \u2014 % used",
+      "title": "Weekly \u2014 % used (from /usage)",
       "datasource": {
         "type": "loki",
         "uid": "loki"
       },
       "gridPos": {
-        "x": 5,
+        "x": 6,
         "y": 1,
-        "w": 5,
+        "w": 6,
         "h": 6
       },
       "targets": [
@@ -305,7 +284,8 @@
         "minVizWidth": 75,
         "minVizHeight": 75,
         "sizing": "auto"
-      }
+      },
+      "description": "The real number from Anthropic's own /usage command (src/collector/internal/usagetruth). The Weekly breakdown table below scales its own token-derived shares by this same percentage — see that panel's description."
     },
     {
       "id": 3,
@@ -316,9 +296,9 @@
         "uid": "loki"
       },
       "gridPos": {
-        "x": 10,
+        "x": 12,
         "y": 1,
-        "w": 5,
+        "w": 6,
         "h": 6
       },
       "targets": [
@@ -379,9 +359,9 @@
         "uid": "loki"
       },
       "gridPos": {
-        "x": 15,
+        "x": 18,
         "y": 1,
-        "w": 5,
+        "w": 6,
         "h": 6
       },
       "targets": [
@@ -443,136 +423,6 @@
       }
     },
     {
-      "id": 15,
-      "type": "stat",
-      "title": "5h \u2014 /usage says",
-      "datasource": {
-        "type": "loki",
-        "uid": "loki"
-      },
-      "gridPos": {
-        "x": 20,
-        "y": 1,
-        "w": 2,
-        "h": 6
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "loki",
-            "uid": "loki"
-          },
-          "editorMode": "code",
-          "expr": "sum(last_over_time({service_name=\"claude-code-usage-truth\"} | user_email =~ `$account` | unwrap session_pct [30m]) by (user_email))",
-          "queryType": "range",
-          "hide": false
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percent",
-          "decimals": 0,
-          "color": {
-            "mode": "fixed",
-            "fixedColor": "text"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "noValue": "\u2014"
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "none",
-        "graphMode": "none",
-        "textMode": "auto",
-        "justifyMode": "auto",
-        "wideLayout": true,
-        "showPercentChange": false
-      },
-      "description": "The real number from /usage itself (usage-truth.mjs), not the derived gauge next to it \u2014 see README's \"The two data sources\" / usage-truth.mjs for what can make them disagree."
-    },
-    {
-      "id": 16,
-      "type": "stat",
-      "title": "Weekly \u2014 /usage says",
-      "datasource": {
-        "type": "loki",
-        "uid": "loki"
-      },
-      "gridPos": {
-        "x": 22,
-        "y": 1,
-        "w": 2,
-        "h": 6
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "loki",
-            "uid": "loki"
-          },
-          "editorMode": "code",
-          "expr": "sum(last_over_time({service_name=\"claude-code-usage-truth\"} | user_email =~ `$account` | unwrap week_pct [30m]) by (user_email))",
-          "queryType": "range",
-          "hide": false
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percent",
-          "decimals": 0,
-          "color": {
-            "mode": "fixed",
-            "fixedColor": "text"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "noValue": "\u2014"
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "none",
-        "graphMode": "none",
-        "textMode": "auto",
-        "justifyMode": "auto",
-        "wideLayout": true,
-        "showPercentChange": false
-      },
-      "description": "The real number from /usage itself (usage-truth.mjs), not the derived gauge next to it \u2014 see README's \"The two data sources\" / usage-truth.mjs for what can make them disagree."
-    },
-    {
       "type": "row",
       "title": "WEEKLY BREAKDOWN",
       "collapsed": true,
@@ -581,6 +431,7 @@
           "id": 10,
           "type": "table",
           "title": "Weekly breakdown",
+          "description": "Each row's percentage is not a share of a configured limit — there isn't one anymore. It's this row's token share (input + output + cache creation, over the selected time range) of the account's trailing 7-day token total, scaled by the real week_pct that /usage reports. Set the range to 7 days and the rows sum to exactly week_pct; narrow it and they sum to that range's contribution toward the week. 'Trailing 7 days' is a fixed-window proxy for 'week-to-date': Anthropic doesn't expose the account's real weekly reset boundary through telemetry, and LogQL range durations must be literals. Two caveats: this assumes tokens count toward the weekly cap linearly across models and effort levels — if Anthropic weights them differently, per-model rows skew relative to their true share; and every row reads 0% early in a week, before /usage reports a nonzero week_pct.",
           "datasource": {
             "type": "loki",
             "uid": "loki"
@@ -599,7 +450,7 @@
                 "uid": "loki"
               },
               "editorMode": "code",
-              "expr": "label_replace(label_replace(100 * (sum by (skill_name, model, effort, query_source)(sum_over_time({service_name=\"claude-code\"} | event_name = `api_request` | user_email =~ `$account` | unwrap input_tokens [$__range])) + sum by (skill_name, model, effort, query_source)(sum_over_time({service_name=\"claude-code\"} | event_name = `api_request` | user_email =~ `$account` | unwrap output_tokens [$__range])) + sum by (skill_name, model, effort, query_source)(sum_over_time({service_name=\"claude-code\"} | event_name = `api_request` | user_email =~ `$account` | unwrap cache_creation_tokens [$__range]))) / $limit_tokens_week, \"model\", \"$1\", \"model\", \"claude-(.+)\"), \"model\", \"$1\", \"model\", \"(.+)-[0-9]{8}$\")",
+              "expr": "label_replace(label_replace((sum by (skill_name, model, effort, query_source)(sum_over_time({service_name=\"claude-code\"} | event_name = `api_request` | user_email =~ `$account` | unwrap input_tokens [$__range])) + sum by (skill_name, model, effort, query_source)(sum_over_time({service_name=\"claude-code\"} | event_name = `api_request` | user_email =~ `$account` | unwrap output_tokens [$__range])) + sum by (skill_name, model, effort, query_source)(sum_over_time({service_name=\"claude-code\"} | event_name = `api_request` | user_email =~ `$account` | unwrap cache_creation_tokens [$__range]))) * on() group_left() (sum(last_over_time({service_name=\"claude-code-usage-truth\"} | user_email =~ `$account` | unwrap week_pct [30m]) by (user_email))) / on() group_left() (sum(sum_over_time({service_name=\"claude-code\"} | event_name = `api_request` | user_email =~ `$account` | unwrap input_tokens [7d])) + sum(sum_over_time({service_name=\"claude-code\"} | event_name = `api_request` | user_email =~ `$account` | unwrap output_tokens [7d])) + sum(sum_over_time({service_name=\"claude-code\"} | event_name = `api_request` | user_email =~ `$account` | unwrap cache_creation_tokens [7d]))), \"model\", \"$1\", \"model\", \"claude-(.+)\"), \"model\", \"$1\", \"model\", \"(.+)-[0-9]{8}$\")",
               "queryType": "instant",
               "hide": false
             }
@@ -642,7 +493,7 @@
                   },
                   {
                     "id": "max",
-                    "value": 10
+                    "value": 100
                   }
                 ]
               }
