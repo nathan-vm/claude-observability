@@ -2,13 +2,16 @@ package usagetruth
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+	"time"
 )
 
 // fakeClaudeOnPath writes a small shell script named "claude" that
@@ -149,6 +152,110 @@ func TestPublishUsageTruth_PublishesOneLinePerLoggedInAccount(t *testing.T) {
 	}
 }
 
+func TestWriteEmptyMCPConfigFile_ReusesDirWhenPresent(t *testing.T) {
+	path1, err := writeEmptyMCPConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path2, err := writeEmptyMCPConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path1 != path2 {
+		t.Errorf("path1 = %q, path2 = %q, want the same path when nothing removed it", path1, path2)
+	}
+}
+
+func TestWriteEmptyMCPConfigFile_SelfHealsWhenDirectoryRemoved(t *testing.T) {
+	path1, err := writeEmptyMCPConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldDir := filepath.Dir(path1)
+	if err := os.RemoveAll(oldDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulates the directory vanishing underneath a long-running
+	// process (e.g. systemd-tmpfiles-clean) — must recreate and retry,
+	// never latch the resulting dangling path or an error forever.
+	path2, err := writeEmptyMCPConfigFile()
+	if err != nil {
+		t.Fatalf("writeEmptyMCPConfigFile did not self-heal after its directory vanished: %v", err)
+	}
+	if _, err := os.Stat(path2); err != nil {
+		t.Fatalf("path2 %q not created after healing: %v", path2, err)
+	}
+	if _, err := os.Stat(oldDir); err == nil {
+		t.Errorf("old directory %q still exists after healing; want it removed so repeated healing can't accumulate directories", oldDir)
+	}
+	content, err := os.ReadFile(path2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != emptyMCPConfig {
+		t.Errorf("content = %q, want %q", content, emptyMCPConfig)
+	}
+}
+
+func TestPublish_PutsResetTextInLineBodyNotMetadata(t *testing.T) {
+	var pushed map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&pushed)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	usage := Usage{
+		SessionPct:   13,
+		SessionReset: "resets Sep 22 at 8:39pm (America/Sao_Paulo)",
+		WeekPct:      42,
+		WeekReset:    "resets Sep 24 at 7:59pm (America/Sao_Paulo)",
+	}
+	if err := publish(srv.URL, "a@example.com", usage); err != nil {
+		t.Fatal(err)
+	}
+
+	streams, _ := pushed["streams"].([]interface{})
+	if len(streams) != 1 {
+		t.Fatalf("pushed = %v", pushed)
+	}
+	values, _ := streams[0].(map[string]interface{})["values"].([]interface{})
+	if len(values) != 1 {
+		t.Fatalf("values = %v", values)
+	}
+	entry, _ := values[0].([]interface{})
+	if len(entry) != 3 {
+		t.Fatalf("entry = %v, want [timestamp, line, metadata]", entry)
+	}
+
+	// Structured metadata (Loki's `unwrap` target set): numeric fields
+	// only. A free-text field here would fan one logical series into one
+	// result series per distinct wording at query time — see the comment
+	// at publish's Metadata map.
+	metadata, _ := entry[2].(map[string]interface{})
+	if len(metadata) != 2 || metadata["session_pct"] != "13" || metadata["week_pct"] != "42" {
+		t.Errorf("metadata = %v, want exactly session_pct=13, week_pct=42", metadata)
+	}
+	for _, forbidden := range []string{"session_reset_text", "week_reset_text"} {
+		if _, ok := metadata[forbidden]; ok {
+			t.Errorf("metadata contains %q, want reset text out of structured metadata", forbidden)
+		}
+	}
+
+	line, _ := entry[1].(string)
+	var body struct {
+		SessionResetText string `json:"session_reset_text"`
+		WeekResetText    string `json:"week_reset_text"`
+	}
+	if err := json.Unmarshal([]byte(line), &body); err != nil {
+		t.Fatalf("line body %q not JSON: %v", line, err)
+	}
+	if body.SessionResetText != usage.SessionReset || body.WeekResetText != usage.WeekReset {
+		t.Errorf("line body = %+v, want reset texts %q / %q", body, usage.SessionReset, usage.WeekReset)
+	}
+}
+
 func TestPublishUsageTruth_SkipsNotLoggedInWithoutError(t *testing.T) {
 	fakeClaudeOnPath(t, `echo '{"loggedIn":false}'`)
 	err := PublishUsageTruth("http://unused.invalid", []string{"/tmp/cfg"}, t.Logf)
@@ -158,3 +265,202 @@ func TestPublishUsageTruth_SkipsNotLoggedInWithoutError(t *testing.T) {
 }
 
 var _ = exec.Command // keep exec imported for future use if needed
+
+func TestFetchUsage_PassesStrictMCPConfigFlags(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake-claude fixture is a POSIX shell script")
+	}
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "args.txt")
+	usagePayload, _ := json.Marshal(map[string]interface{}{
+		"is_error": false,
+		"result":   "Current session: 1% used\nCurrent week (all models): 2% used",
+	})
+	script := "#!/bin/sh\n" +
+		`echo "$@" > ` + argsPath + "\n" +
+		"cat <<'EOF'\n" + string(usagePayload) + "\nEOF\n"
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if _, err := FetchUsage("/tmp/cfg"); err != nil {
+		t.Fatal(err)
+	}
+
+	seenArgs, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	argsLine := strings.TrimSpace(string(seenArgs))
+	if !strings.Contains(argsLine, "--strict-mcp-config") {
+		t.Errorf("args = %q, want --strict-mcp-config", argsLine)
+	}
+	fields := strings.Fields(argsLine)
+	idx := -1
+	for i, f := range fields {
+		if f == "--mcp-config" {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 || idx+1 >= len(fields) {
+		t.Fatalf("args = %q, want --mcp-config followed by a path", argsLine)
+	}
+	configContent, err := os.ReadFile(fields[idx+1])
+	if err != nil {
+		t.Fatalf("--mcp-config path %q not readable: %v", fields[idx+1], err)
+	}
+	if string(configContent) != `{"mcpServers":{}}` {
+		t.Errorf("mcp config content = %q, want empty mcpServers", configContent)
+	}
+	// The flags must precede -p: --mcp-config is variadic and greedily eats
+	// following bare words, so anything non-flag after the config path would
+	// be swallowed as another config file. See the pre-verification notes.
+	pIdx := -1
+	for i, f := range fields {
+		if f == "-p" {
+			pIdx = i
+			break
+		}
+	}
+	if pIdx == -1 || pIdx != idx+2 {
+		t.Errorf("args = %q, want -p immediately after the --mcp-config path", argsLine)
+	}
+}
+
+func TestAccountEmail_DoesNotPassMCPConfigFlags(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake-claude fixture is a POSIX shell script")
+	}
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "args.txt")
+	script := "#!/bin/sh\n" +
+		`echo "$@" > ` + argsPath + "\n" +
+		`echo '{"loggedIn":true,"email":"a@example.com"}'` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if _, err := AccountEmail("/tmp/cfg"); err != nil {
+		t.Fatal(err)
+	}
+
+	seenArgs, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Not merely unnecessary — actively breaking. --mcp-config is variadic
+	// and would swallow the `auth` and `status` subcommand words as config
+	// file paths, failing the command outright. Verified live.
+	if strings.Contains(string(seenArgs), "--mcp-config") {
+		t.Errorf("args = %q, auth status must not receive --mcp-config", seenArgs)
+	}
+}
+
+func TestWriteEmptyMCPConfigFile_RefusesSymlinkPlantedAtStaleDirPath(t *testing.T) {
+	path1, err := writeEmptyMCPConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleDir := filepath.Dir(path1)
+	if err := os.RemoveAll(staleDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulates a co-resident local user planting a symlink at the exact
+	// path a directory just vanished from (its name is no longer secret
+	// once tmpfiles-clean removed it once), pointing at somewhere they
+	// want written.
+	symlinkTarget := t.TempDir()
+	if err := os.Symlink(symlinkTarget, staleDir); err != nil {
+		t.Fatal(err)
+	}
+
+	path2, err := writeEmptyMCPConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(path2) == staleDir || filepath.Dir(path2) == symlinkTarget {
+		t.Fatalf("path2 = %q, want a fresh MkdirTemp directory, not the planted symlink or its target", path2)
+	}
+	if _, err := os.Stat(filepath.Join(symlinkTarget, "empty-mcp-config.json")); err == nil {
+		t.Errorf("empty-mcp-config.json was written through the planted symlink into %q", symlinkTarget)
+	}
+	content, err := os.ReadFile(path2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != emptyMCPConfig {
+		t.Errorf("content = %q, want %q", content, emptyMCPConfig)
+	}
+}
+
+// TestKillProcessGroup_AlreadyExitedReturnsErrProcessDone pins the
+// os/exec Cmd.Cancel contract directly and deterministically, rather than
+// racing a timeout against a fast-exiting real `claude` process end to
+// end: killProcessGroup must map "group already gone" (ESRCH) to
+// os.ErrProcessDone, the only sentinel Cmd.Cancel's contract treats as
+// "not a real Cancel failure" — a raw ESRCH would otherwise turn an
+// already-successful run into a spurious Wait() error.
+func TestKillProcessGroup_AlreadyExitedReturnsErrProcessDone(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process-group kill is POSIX-specific; see proc_windows.go")
+	}
+	cmd := exec.Command("true")
+	setNewProcessGroup(cmd)
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := killProcessGroup(cmd); !errors.Is(err, os.ErrProcessDone) {
+		t.Errorf("killProcessGroup() on an already-reaped process = %v, want an error satisfying errors.Is(err, os.ErrProcessDone)", err)
+	}
+}
+
+func TestRunClaudeWithTimeout_KillsGrandchildProcessGroup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process-group kill is POSIX-specific; see proc_windows.go")
+	}
+	dir := t.TempDir()
+	heartbeat := filepath.Join(dir, "heartbeat")
+	// The fixture backgrounds a loop that appends one line every ~20ms —
+	// simulating a grandchild like `docker run` that a plain
+	// cmd.Process.Kill() (direct child only) would leave running — then
+	// blocks in the foreground well past the test's short timeout, so the
+	// only thing that can end this script is our own timeout-triggered
+	// group kill. A shell-builtin line count, not a `date +%N` timestamp:
+	// BSD/macOS date has no nanosecond field, and counting lines instead of
+	// comparing wall-clock content also avoids forking an external `date`
+	// binary per iteration, which is what made the first heartbeat arrive
+	// late enough to make a short timeout flaky here.
+	script := "#!/bin/sh\n" +
+		`( i=0; while true; do i=$((i+1)); echo $i >> ` + heartbeat + `; sleep 0.02; done ) &` + "\n" +
+		"sleep 30\n"
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := runClaudeWithTimeout("/tmp/cfg", 1*time.Second)
+	if err == nil {
+		t.Fatal("want a timeout error")
+	}
+
+	lineCount := func() int {
+		b, _ := os.ReadFile(heartbeat)
+		if len(b) == 0 {
+			return 0
+		}
+		return len(strings.Split(strings.TrimSpace(string(b)), "\n"))
+	}
+	first := lineCount()
+	if first == 0 {
+		t.Fatal("grandchild never started heartbeating — fixture didn't run as expected")
+	}
+	time.Sleep(500 * time.Millisecond) // well past the 20ms heartbeat interval
+	second := lineCount()
+	if first != second {
+		t.Errorf("heartbeat still advancing after timeout (%d -> %d lines); want the grandchild to have died with the process group, not outlived it", first, second)
+	}
+}
