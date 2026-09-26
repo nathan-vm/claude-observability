@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -20,6 +21,29 @@ import (
 )
 
 const claudeTimeout = 30 * time.Second
+
+// emptyMCPConfig is the literal file content passed to `claude` via
+// --mcp-config, paired with --strict-mcp-config, so FetchUsage's headless
+// `/usage` probe boots zero MCP servers instead of the user's full
+// configured set (including Docker-based ones whose container survives a
+// timed-out `claude` process — see runClaudeWithTimeout for the second half
+// of that fix).
+const emptyMCPConfig = `{"mcpServers":{}}`
+
+// writeEmptyMCPConfigFile (re)writes emptyMCPConfig to a fixed path under
+// os.TempDir() and returns that path. A file path, not an inline JSON
+// string: --mcp-config's help text only documents "JSON files", and a path
+// sidesteps the question of whether an inline string is also accepted.
+// Rewritten unconditionally on every call rather than cached — the content
+// is static and the write is a few bytes, far cheaper than the bug this
+// exists to avoid.
+func writeEmptyMCPConfigFile() (string, error) {
+	path := filepath.Join(os.TempDir(), "claude-observability-empty-mcp-config.json")
+	if err := os.WriteFile(path, []byte(emptyMCPConfig), 0o644); err != nil {
+		return "", fmt.Errorf("writing empty MCP config: %w", err)
+	}
+	return path, nil
+}
 
 // Usage is one account's current session/week percentages and Anthropic's
 // own "resets at" text for each (empty when the window reads 0% used —
@@ -91,7 +115,15 @@ func parseUsage(text string) (Usage, error) {
 // the rest of /usage's output is explicitly scoped by Anthropic to "local
 // sessions on this machine".
 func FetchUsage(configDir string) (Usage, error) {
-	out, err := runClaude(configDir, "-p", "/usage", "--output-format", "json", "--no-session-persistence")
+	mcpConfigPath, err := writeEmptyMCPConfigFile()
+	if err != nil {
+		return Usage{}, err
+	}
+	// Flag order matters: --mcp-config is variadic and greedily consumes
+	// following bare words, so -p must come immediately after the path.
+	out, err := runClaude(configDir,
+		"--strict-mcp-config", "--mcp-config", mcpConfigPath,
+		"-p", "/usage", "--output-format", "json", "--no-session-persistence")
 	if err != nil {
 		return Usage{}, err
 	}

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -158,3 +159,96 @@ func TestPublishUsageTruth_SkipsNotLoggedInWithoutError(t *testing.T) {
 }
 
 var _ = exec.Command // keep exec imported for future use if needed
+
+func TestFetchUsage_PassesStrictMCPConfigFlags(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake-claude fixture is a POSIX shell script")
+	}
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "args.txt")
+	usagePayload, _ := json.Marshal(map[string]interface{}{
+		"is_error": false,
+		"result":   "Current session: 1% used\nCurrent week (all models): 2% used",
+	})
+	script := "#!/bin/sh\n" +
+		`echo "$@" > ` + argsPath + "\n" +
+		"cat <<'EOF'\n" + string(usagePayload) + "\nEOF\n"
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if _, err := FetchUsage("/tmp/cfg"); err != nil {
+		t.Fatal(err)
+	}
+
+	seenArgs, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	argsLine := strings.TrimSpace(string(seenArgs))
+	if !strings.Contains(argsLine, "--strict-mcp-config") {
+		t.Errorf("args = %q, want --strict-mcp-config", argsLine)
+	}
+	fields := strings.Fields(argsLine)
+	idx := -1
+	for i, f := range fields {
+		if f == "--mcp-config" {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 || idx+1 >= len(fields) {
+		t.Fatalf("args = %q, want --mcp-config followed by a path", argsLine)
+	}
+	configContent, err := os.ReadFile(fields[idx+1])
+	if err != nil {
+		t.Fatalf("--mcp-config path %q not readable: %v", fields[idx+1], err)
+	}
+	if string(configContent) != `{"mcpServers":{}}` {
+		t.Errorf("mcp config content = %q, want empty mcpServers", configContent)
+	}
+	// The flags must precede -p: --mcp-config is variadic and greedily eats
+	// following bare words, so anything non-flag after the config path would
+	// be swallowed as another config file. See the pre-verification notes.
+	pIdx := -1
+	for i, f := range fields {
+		if f == "-p" {
+			pIdx = i
+			break
+		}
+	}
+	if pIdx == -1 || pIdx != idx+2 {
+		t.Errorf("args = %q, want -p immediately after the --mcp-config path", argsLine)
+	}
+}
+
+func TestAccountEmail_DoesNotPassMCPConfigFlags(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake-claude fixture is a POSIX shell script")
+	}
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "args.txt")
+	script := "#!/bin/sh\n" +
+		`echo "$@" > ` + argsPath + "\n" +
+		`echo '{"loggedIn":true,"email":"a@example.com"}'` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if _, err := AccountEmail("/tmp/cfg"); err != nil {
+		t.Fatal(err)
+	}
+
+	seenArgs, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Not merely unnecessary — actively breaking. --mcp-config is variadic
+	// and would swallow the `auth` and `status` subcommand words as config
+	// file paths, failing the command outright. Verified live.
+	if strings.Contains(string(seenArgs), "--mcp-config") {
+		t.Errorf("args = %q, auth status must not receive --mcp-config", seenArgs)
+	}
+}
