@@ -366,59 +366,35 @@ func applyCutlines(dashboard map[string]interface{}, byName map[string]Cutlines)
 	}
 }
 
-// AccountLimits are the block_5h/week token-limit references drawn on the
-// gauges. No longer auto-calibrated by anything (usage-meter is gone) —
-// purely user-set in account-limits.json, or the hardcoded default.
-type AccountLimits struct {
-	Block5h, Week int64
-}
-
+// loadLimits reads account-limits.json and returns it as a generic map.
+// The only field GenerateDashboards still reads is "ignore" — anything else
+// in the file (e.g. leftover default/accounts/block_5h/week fields from
+// before per-account limits were removed) is opaque here and passed through
+// unread, so an existing real file with the old shape keeps working without
+// migration.
 func loadLimits(path string) (map[string]interface{}, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return map[string]interface{}{}, nil
 		}
-		return nil, fmt.Errorf("account-limits.json unreadable (%w); fix the file: carrying on without it would revert limits and the ignore list", err)
+		return nil, fmt.Errorf("account-limits.json unreadable (%w); fix the file: carrying on without it would revert the ignore list", err)
 	}
 	var doc map[string]interface{}
 	if err := json.Unmarshal(data, &doc); err != nil {
-		return nil, fmt.Errorf("account-limits.json unreadable (%w); fix the file: carrying on without it would revert limits and the ignore list", err)
+		return nil, fmt.Errorf("account-limits.json unreadable (%w); fix the file: carrying on without it would revert the ignore list", err)
 	}
 	return doc, nil
-}
-
-func limitsFor(doc map[string]interface{}, email string) AccountLimits {
-	result := AccountLimits{Block5h: 1_750_000, Week: 21_500_000}
-	if def, ok := doc["default"].(map[string]interface{}); ok {
-		if v, ok := def["block_5h"].(float64); ok {
-			result.Block5h = int64(v)
-		}
-		if v, ok := def["week"].(float64); ok {
-			result.Week = int64(v)
-		}
-	}
-	if accounts, ok := doc["accounts"].(map[string]interface{}); ok {
-		if acct, ok := accounts[email].(map[string]interface{}); ok {
-			if v, ok := acct["block_5h"].(float64); ok {
-				result.Block5h = int64(v)
-			}
-			if v, ok := acct["week"].(float64); ok {
-				result.Week = int64(v)
-			}
-		}
-	}
-	return result
 }
 
 // scopeAccount deep-clones template and mutates the clone: pins the
 // account, injects cutlines into thresholds AND into the LogQL expressions
 // themselves (the rate panel filters by cutline in-query, not just at
-// display time), sets the limit-reference textboxes, rewrites drill-down
-// links to point at this account's own uid, and replaces the MCP-
-// server/skill-owner filter options with what this account actually used.
+// display time), rewrites drill-down links to point at this account's own
+// uid, and replaces the MCP-server/skill-owner filter options with what
+// this account actually used.
 func scopeAccount(template map[string]interface{}, email string, cutlines AllCutlines,
-	servers []string, owners []Option, limits AccountLimits, exporterStream, rateHalfLife string,
+	servers []string, owners []Option, exporterStream, rateHalfLife string,
 ) (map[string]interface{}, error) {
 	data, err := json.Marshal(template)
 	if err != nil {
@@ -467,17 +443,6 @@ func scopeAccount(template map[string]interface{}, email string, cutlines AllCut
 			expr = strings.ReplaceAll(expr, "__CUT_EXTREME__", strconv.FormatInt(cutlines.Total.Extreme, 10))
 			target["expr"] = expr
 		}
-	}
-
-	for _, nv := range []struct {
-		name  string
-		value int64
-	}{{"limit_tokens_5h", limits.Block5h}, {"limit_tokens_week", limits.Week}} {
-		v := strconv.FormatInt(nv.value, 10)
-		replaceVariable(dashboard, map[string]interface{}{
-			"name": nv.name, "type": "textbox", "hide": float64(2),
-			"query": v, "current": map[string]interface{}{"text": v, "value": v},
-		})
 	}
 
 	for _, panel := range allPanels(dashboard) {
@@ -612,18 +577,17 @@ func GenerateDashboards(cfg Config, log func(string, ...any)) error {
 		output := rateCutlines(cfg.LokiURL, cfg.ExporterStream, cfg.RateHalfLife, email, "rate_output")
 		servers := mcpServers(cfg.LokiURL, cfg.ExporterStream, email)
 		owners := skillOwners(cfg.LokiURL, cfg.ExporterStream, email)
-		accountLimits := limitsFor(limits, email)
 
 		dashboard, err := scopeAccount(template, email, AllCutlines{total, input, output}, servers, owners,
-			accountLimits, cfg.ExporterStream, cfg.RateHalfLife)
+			cfg.ExporterStream, cfg.RateHalfLife)
 		if err != nil {
 			return err
 		}
 		wanted[slug(email)+".json"] = dashboard
 
-		log("%s  ->  total cutlines P75 %s / outlier %s tokens/h / extreme %s, %d MCP server(s), %d skill owner(s), limits %s/5h and %s/week",
+		log("%s  ->  total cutlines P75 %s / outlier %s tokens/h / extreme %s, %d MCP server(s), %d skill owner(s)",
 			email, commaFormat(total.P75), commaFormat(total.Outlier), commaFormat(total.Extreme),
-			len(servers), len(owners), commaFormat(accountLimits.Block5h), commaFormat(accountLimits.Week))
+			len(servers), len(owners))
 	}
 
 	existing, _ := os.ReadDir(outDir)
