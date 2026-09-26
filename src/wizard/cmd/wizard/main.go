@@ -127,8 +127,7 @@ func run() error {
 			}
 		}
 		limitsPath := filepath.Join(repoRoot, "grafana", "account-limits.json")
-		examplePath := filepath.Join(repoRoot, "grafana", "account-limits.example.json")
-		if err := limits.Update(limitsPath, examplePath, emails); err != nil {
+		if err := limits.Update(limitsPath, emails); err != nil {
 			return err
 		}
 		fmt.Fprintf(out, "  not monitored: %v\n", emails)

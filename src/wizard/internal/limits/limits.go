@@ -9,18 +9,15 @@ import (
 
 // Update sets the "ignore" field of the JSON file at path to ignored
 // (deduped, skipping empty strings), preserving every other top-level
-// field untouched. If path doesn't exist, it's first created as a copy of
-// examplePath.
-func Update(path, examplePath string, ignored []string) error {
+// field untouched. If path doesn't exist, it's first created as an empty
+// document.
+func Update(path string, ignored []string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return err
 		}
-		data, err = os.ReadFile(examplePath)
-		if err != nil {
-			return err
-		}
+		data = []byte("{}")
 	}
 
 	var doc map[string]interface{}
