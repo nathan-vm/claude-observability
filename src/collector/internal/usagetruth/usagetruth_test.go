@@ -255,6 +255,52 @@ func TestAccountEmail_DoesNotPassMCPConfigFlags(t *testing.T) {
 	}
 }
 
+func TestWriteEmptyMCPConfigFile_ReusesDirWhenPresent(t *testing.T) {
+	path1, err := writeEmptyMCPConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path2, err := writeEmptyMCPConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path1 != path2 {
+		t.Errorf("path1 = %q, path2 = %q, want the same path when nothing removed it", path1, path2)
+	}
+}
+
+func TestWriteEmptyMCPConfigFile_SelfHealsWhenDirectoryRemoved(t *testing.T) {
+	path1, err := writeEmptyMCPConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldDir := filepath.Dir(path1)
+	if err := os.RemoveAll(oldDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulates the directory vanishing underneath a long-running
+	// process (e.g. systemd-tmpfiles-clean) — must recreate and retry,
+	// never latch the resulting dangling path or an error forever.
+	path2, err := writeEmptyMCPConfigFile()
+	if err != nil {
+		t.Fatalf("writeEmptyMCPConfigFile did not self-heal after its directory vanished: %v", err)
+	}
+	if _, err := os.Stat(path2); err != nil {
+		t.Fatalf("path2 %q not created after healing: %v", path2, err)
+	}
+	if _, err := os.Stat(oldDir); err == nil {
+		t.Errorf("old directory %q still exists after healing; want it removed so repeated healing can't accumulate directories", oldDir)
+	}
+	content, err := os.ReadFile(path2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != emptyMCPConfig {
+		t.Errorf("content = %q, want %q", content, emptyMCPConfig)
+	}
+}
+
 // TestKillProcessGroup_AlreadyExitedReturnsErrProcessDone pins the
 // os/exec Cmd.Cancel contract directly and deterministically, rather than
 // racing a timeout against a fast-exiting real `claude` process end to

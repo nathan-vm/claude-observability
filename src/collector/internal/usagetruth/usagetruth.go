@@ -32,35 +32,58 @@ const claudeTimeout = 30 * time.Second
 const emptyMCPConfig = `{"mcpServers":{}}`
 
 var (
-	mcpConfigOnce sync.Once
-	mcpConfigPath string
-	mcpConfigErr  error
+	mcpConfigMu  sync.Mutex
+	mcpConfigDir string
 )
 
-// writeEmptyMCPConfigFile writes emptyMCPConfig once per process to a
-// fixed filename inside a freshly created, mode-0700, randomly named
-// directory (via os.MkdirTemp) and returns that path on every call. A
-// fixed, predictable path under the shared os.TempDir() would let another
-// local user on a host with a world-writable /tmp pre-create a symlink
-// there — os.WriteFile follows symlinks — and silently redirect/truncate
-// an arbitrary target on every poll. The random directory name defeats
-// pre-creation and the 0700 mode locks out other users entirely, without
-// resorting to a platform-specific O_NOFOLLOW open.
+// writeEmptyMCPConfigFile writes emptyMCPConfig to a fixed filename inside
+// a private, mode-0700, randomly named directory (via os.MkdirTemp) and
+// returns that path. The random directory name is what defeats a local
+// user pre-creating a symlink at a predictable path — os.WriteFile follows
+// symlinks — and the 0700 mode locks out other users entirely, without
+// resorting to a platform-specific O_NOFOLLOW open; the directory itself
+// is deliberately left behind on process exit (the collector has no
+// shutdown hook to remove it, and one leaked directory per process start
+// is a cost worth paying to keep the path unpredictable) — one directory
+// per process lifetime is the accumulation this is meant to bound, not
+// zero.
+//
+// Self-healing, not sync.Once-cached: this runs inside a `for { pass();
+// sleep }` loop with no process restart, so a one-time cache would latch
+// forever onto whatever it first saw. Concretely: (a) systemd-tmpfiles-clean
+// (or equivalent) removes stale /tmp entries after ~10 days on several
+// distros, which would leave every later call pointing at a missing
+// directory, and claude would fail --mcp-config on every poll from then
+// on; (b) a transient MkdirTemp/WriteFile failure would latch that error
+// forever instead of retrying once the condition clears. Recreating the
+// directory (and rewriting the 25-byte file) on every call that finds it
+// gone costs nothing and never leaves a permanent failure mode.
 func writeEmptyMCPConfigFile() (string, error) {
-	mcpConfigOnce.Do(func() {
+	mcpConfigMu.Lock()
+	defer mcpConfigMu.Unlock()
+
+	if mcpConfigDir != "" {
+		if _, err := os.Stat(mcpConfigDir); err != nil {
+			// Gone underneath us (tmpfiles-clean or similar) — drop the
+			// stale reference so we don't accumulate directories across
+			// repeated healing, and fall through to recreate it below.
+			os.RemoveAll(mcpConfigDir)
+			mcpConfigDir = ""
+		}
+	}
+	if mcpConfigDir == "" {
 		dir, err := os.MkdirTemp("", "claude-observability-mcp-config-*")
 		if err != nil {
-			mcpConfigErr = fmt.Errorf("creating empty MCP config dir: %w", err)
-			return
+			return "", fmt.Errorf("creating empty MCP config dir: %w", err)
 		}
-		path := filepath.Join(dir, "empty-mcp-config.json")
-		if err := os.WriteFile(path, []byte(emptyMCPConfig), 0o600); err != nil {
-			mcpConfigErr = fmt.Errorf("writing empty MCP config: %w", err)
-			return
-		}
-		mcpConfigPath = path
-	})
-	return mcpConfigPath, mcpConfigErr
+		mcpConfigDir = dir
+	}
+
+	path := filepath.Join(mcpConfigDir, "empty-mcp-config.json")
+	if err := os.WriteFile(path, []byte(emptyMCPConfig), 0o600); err != nil {
+		return "", fmt.Errorf("writing empty MCP config: %w", err)
+	}
+	return path, nil
 }
 
 // Usage is one account's current session/week percentages and Anthropic's
