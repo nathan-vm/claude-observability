@@ -7,7 +7,6 @@ grafana/dashboards/accounts/
 
 # Limites por conta e lista de contas ignoradas — contém emails. Editado à
 # mão (sem mais recalibração automática — ver README.md, "The limit references").
-# Modelo: grafana/account-limits.example.json
 grafana/account-limits.json
 
 # Estado do collector: offsets de transcript, dedup, log do launchd. Derivado —
