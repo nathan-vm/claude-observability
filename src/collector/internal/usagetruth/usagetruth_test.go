@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeClaudeOnPath writes a small shell script named "claude" that
@@ -250,5 +251,45 @@ func TestAccountEmail_DoesNotPassMCPConfigFlags(t *testing.T) {
 	// file paths, failing the command outright. Verified live.
 	if strings.Contains(string(seenArgs), "--mcp-config") {
 		t.Errorf("args = %q, auth status must not receive --mcp-config", seenArgs)
+	}
+}
+
+func TestRunClaudeWithTimeout_KillsGrandchildProcessGroup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process-group kill is POSIX-specific; see proc_windows.go")
+	}
+	dir := t.TempDir()
+	heartbeat := filepath.Join(dir, "heartbeat")
+	// The fixture backgrounds a loop that writes a fresh heartbeat every
+	// ~50ms — simulating a grandchild like `docker run` that a plain
+	// cmd.Process.Kill() (direct child only) would leave running — then
+	// blocks in the foreground well past the test's short timeout, so the
+	// only thing that can end this script is our own timeout-triggered
+	// group kill.
+	script := "#!/bin/sh\n" +
+		`( while true; do date +%s%N > ` + heartbeat + `; sleep 0.05; done ) &` + "\n" +
+		"sleep 30\n"
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := runClaudeWithTimeout("/tmp/cfg", 2*time.Second)
+	if err == nil {
+		t.Fatal("want a timeout error")
+	}
+
+	readHeartbeat := func() []byte {
+		b, _ := os.ReadFile(heartbeat)
+		return b
+	}
+	first := readHeartbeat()
+	if len(first) == 0 {
+		t.Fatal("grandchild never started heartbeating — fixture didn't run as expected")
+	}
+	time.Sleep(1 * time.Second) // well past the 50ms heartbeat interval
+	second := readHeartbeat()
+	if string(first) != string(second) {
+		t.Errorf("heartbeat still advancing after timeout (%q -> %q); want the grandchild to have died with the process group, not outlived it", first, second)
 	}
 }

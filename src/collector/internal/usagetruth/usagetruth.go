@@ -56,10 +56,32 @@ type Usage struct {
 }
 
 func runClaude(configDir string, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), claudeTimeout)
+	return runClaudeWithTimeout(configDir, claudeTimeout, args...)
+}
+
+// runClaudeWithTimeout is runClaude with an injectable timeout — the seam
+// TestRunClaudeWithTimeout_KillsGrandchildProcessGroup uses to exercise the
+// process-group-kill path in well under a second instead of the real 30s
+// claudeTimeout. Production code only ever reaches this through runClaude,
+// which always passes the untouched claudeTimeout constant, so this
+// refactor changes no production timeout behavior.
+func runClaudeWithTimeout(configDir string, timeout time.Duration, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Env = append(os.Environ(), "CLAUDE_CONFIG_DIR="+configDir)
+
+	// exec.CommandContext's default Cancel kills only the direct `claude`
+	// child; a grandchild it spawned (e.g. a Docker-based MCP server via
+	// `docker run`) reparents to PID 1 and keeps running. Starting claude
+	// in its own process group and overriding Cancel to kill that whole
+	// group closes that gap. WaitDelay bounds how long Wait() can be stuck
+	// after Cancel runs, in case a grandchild still holds an inherited
+	// stdout/stderr pipe fd open.
+	setNewProcessGroup(cmd)
+	cmd.Cancel = func() error { return killProcessGroup(cmd) }
+	cmd.WaitDelay = 5 * time.Second
+
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil {
