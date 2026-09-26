@@ -58,16 +58,31 @@ var (
 // forever instead of retrying once the condition clears. Recreating the
 // directory (and rewriting the 25-byte file) on every call that finds it
 // gone costs nothing and never leaves a permanent failure mode.
+//
+// The staleness check uses os.Lstat, not os.Stat, and requires a real
+// directory: os.Stat follows symlinks, and the directory's name is no
+// longer secret once tmpfiles-clean has removed it once — a co-resident
+// local user could plant a symlink at that exact path pointing wherever
+// they want written, and a Stat-based check would resolve through it and
+// os.WriteFile straight into their target. Lstat sees the symlink itself,
+// fails the IsDir check, and forces a fresh MkdirTemp with a new,
+// unguessed random name instead.
 func writeEmptyMCPConfigFile() (string, error) {
 	mcpConfigMu.Lock()
 	defer mcpConfigMu.Unlock()
 
 	if mcpConfigDir != "" {
-		if _, err := os.Stat(mcpConfigDir); err != nil {
-			// Gone underneath us (tmpfiles-clean or similar) — drop the
-			// stale reference so we don't accumulate directories across
-			// repeated healing, and fall through to recreate it below.
-			os.RemoveAll(mcpConfigDir)
+		if fi, err := os.Lstat(mcpConfigDir); err != nil || !fi.IsDir() {
+			// Gone underneath us (tmpfiles-clean or similar), or replaced
+			// by something that isn't a real directory (e.g. a planted
+			// symlink) — drop the stale reference and fall through to
+			// recreate it below. RemoveAll's error is deliberately
+			// discarded: if removal fails, this directory is simply
+			// abandoned (one extra /tmp entry) and we proceed with a
+			// fresh one — staying available matters more here than
+			// tidying up, and the package has no logger to report it
+			// through.
+			_ = os.RemoveAll(mcpConfigDir)
 			mcpConfigDir = ""
 		}
 	}

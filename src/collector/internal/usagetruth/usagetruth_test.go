@@ -359,6 +359,44 @@ func TestAccountEmail_DoesNotPassMCPConfigFlags(t *testing.T) {
 	}
 }
 
+func TestWriteEmptyMCPConfigFile_RefusesSymlinkPlantedAtStaleDirPath(t *testing.T) {
+	path1, err := writeEmptyMCPConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleDir := filepath.Dir(path1)
+	if err := os.RemoveAll(staleDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulates a co-resident local user planting a symlink at the exact
+	// path a directory just vanished from (its name is no longer secret
+	// once tmpfiles-clean removed it once), pointing at somewhere they
+	// want written.
+	symlinkTarget := t.TempDir()
+	if err := os.Symlink(symlinkTarget, staleDir); err != nil {
+		t.Fatal(err)
+	}
+
+	path2, err := writeEmptyMCPConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(path2) == staleDir || filepath.Dir(path2) == symlinkTarget {
+		t.Fatalf("path2 = %q, want a fresh MkdirTemp directory, not the planted symlink or its target", path2)
+	}
+	if _, err := os.Stat(filepath.Join(symlinkTarget, "empty-mcp-config.json")); err == nil {
+		t.Errorf("empty-mcp-config.json was written through the planted symlink into %q", symlinkTarget)
+	}
+	content, err := os.ReadFile(path2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != emptyMCPConfig {
+		t.Errorf("content = %q, want %q", content, emptyMCPConfig)
+	}
+}
+
 // TestKillProcessGroup_AlreadyExitedReturnsErrProcessDone pins the
 // os/exec Cmd.Cancel contract directly and deterministically, rather than
 // racing a timeout against a fast-exiting real `claude` process end to
