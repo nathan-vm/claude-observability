@@ -32,6 +32,7 @@ services:
 
   grafana:
     environment:
+      - GF_SERVER_ROOT_URL=https://${GRAFANA_DOMAIN}/
       - GF_AUTH_ANONYMOUS_ENABLED=false
       - GF_AUTH_GOOGLE_ENABLED=true
       - GF_AUTH_GOOGLE_CLIENT_ID=${GRAFANA_GOOGLE_CLIENT_ID:?set GRAFANA_GOOGLE_CLIENT_ID in .env — see .env.example}
