@@ -36,3 +36,7 @@ docker-worktree.local
 /src/dash-generator/dash-generator.exe
 /src/collector/collector
 /src/collector/collector.exe
+
+# Real per-person Caddy credentials (bcrypt hashes) — template alongside at
+# config/caddy-ingest-users.txt.example. See scripts/manage-tokens.sh.
+config/caddy-ingest-users.txt

@@ -1,0 +1,38 @@
+# Production auth gateway — the only service a real-server deployment
+# exposes publicly. See docs/superpowers/specs/2026-09-29-production-auth-gateway-design.md.
+#
+# Requires Caddy >= 2.8.0 (the "basic_auth" directive; older Caddy names it
+# "basicauth"). config/caddy-ingest-users.txt (git-ignored — see
+# config/caddy-ingest-users.txt.example) holds one "<email> <bcrypt-hash>"
+# line per person, managed by scripts/manage-tokens.sh.
+#
+# All credential checking happens here — otel-collector and Loki are never
+# given their own auth config, and the internal otel-collector -> loki
+# write stays exactly as unauthenticated as it is today.
+
+{$OTEL_DOMAIN} {
+	basic_auth * {
+		import /etc/caddy/caddy-ingest-users.txt
+	}
+	# otel-collector's OTLP gRPC receiver speaks cleartext HTTP/2
+	# internally (TLS is Caddy's job, at the public edge) — without this,
+	# Caddy defaults to HTTP/1.1 to the backend, which gRPC cannot use.
+	reverse_proxy otel-collector:4317 {
+		transport http {
+			versions h2c
+		}
+	}
+}
+
+{$LOKI_INGEST_DOMAIN} {
+	basic_auth * {
+		import /etc/caddy/caddy-ingest-users.txt
+	}
+	reverse_proxy loki:3100
+}
+
+{$GRAFANA_DOMAIN} {
+	# Grafana authenticates itself (Google OAuth — see
+	# docker-compose.server.yaml); Caddy just proxies.
+	reverse_proxy grafana:3000
+}
