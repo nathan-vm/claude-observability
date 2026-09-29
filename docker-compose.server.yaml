@@ -1,0 +1,44 @@
+# Overlay for a real server deployment: adds Caddy as the only publicly
+# exposed service and switches Grafana to individual Google-account login.
+# Does NOT replace docker-compose.yaml — it's merged on top of it:
+#
+#   cp .env.example .env   # fill in real values first
+#   docker compose -f docker-compose.yaml -f docker-compose.server.yaml up -d
+#
+# Plain `docker compose up -d` (no this file) is completely unaffected —
+# today's local, unauthenticated single-machine setup doesn't change.
+# See docs/superpowers/specs/2026-09-29-production-auth-gateway-design.md.
+
+services:
+  caddy:
+    image: caddy:2
+    ports:
+      - "0.0.0.0:80:80"
+      - "0.0.0.0:443:443"
+    environment:
+      - OTEL_DOMAIN=${OTEL_DOMAIN:?set OTEL_DOMAIN in .env — see .env.example}
+      - LOKI_INGEST_DOMAIN=${LOKI_INGEST_DOMAIN:?set LOKI_INGEST_DOMAIN in .env — see .env.example}
+      - GRAFANA_DOMAIN=${GRAFANA_DOMAIN:?set GRAFANA_DOMAIN in .env — see .env.example}
+    volumes:
+      - ./config/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./config/caddy-ingest-users.txt:/etc/caddy/caddy-ingest-users.txt:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - otel-collector
+      - loki
+      - grafana
+    restart: unless-stopped
+
+  grafana:
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_AUTH_GOOGLE_ENABLED=true
+      - GF_AUTH_GOOGLE_CLIENT_ID=${GRAFANA_GOOGLE_CLIENT_ID:?set GRAFANA_GOOGLE_CLIENT_ID in .env — see .env.example}
+      - GF_AUTH_GOOGLE_CLIENT_SECRET=${GRAFANA_GOOGLE_CLIENT_SECRET:?set GRAFANA_GOOGLE_CLIENT_SECRET in .env — see .env.example}
+      - GF_AUTH_GOOGLE_ALLOWED_DOMAINS=${GRAFANA_GOOGLE_ALLOWED_DOMAINS:?set GRAFANA_GOOGLE_ALLOWED_DOMAINS in .env — see .env.example}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env — see .env.example}
+
+volumes:
+  caddy-data:
+  caddy-config:
