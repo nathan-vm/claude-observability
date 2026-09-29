@@ -20,8 +20,7 @@ services:
       - LOKI_INGEST_DOMAIN=${LOKI_INGEST_DOMAIN:?set LOKI_INGEST_DOMAIN in .env — see .env.example}
       - GRAFANA_DOMAIN=${GRAFANA_DOMAIN:?set GRAFANA_DOMAIN in .env — see .env.example}
     volumes:
-      - ./config/Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./config/caddy-ingest-users.txt:/etc/caddy/caddy-ingest-users.txt:ro
+      - ./config:/etc/caddy:ro
       - caddy-data:/data
       - caddy-config:/config
     depends_on:
