@@ -64,10 +64,15 @@ func run() error {
 		accounts = []discovery.Account{{Dir: filepath.Join(home, ".claude")}}
 	}
 	chosen, rejected := wizard.ChooseAccounts(out, stdin, accounts)
+	defaultEmail := ""
+	if len(chosen) > 0 {
+		defaultEmail = chosen[0].Email
+	}
 
 	fmt.Fprintln(out, "\n── OTel endpoint ───────────────────────────────────────────")
 	endpoint := wizard.AskLine(out, stdin, "OTel endpoint", "http://localhost:47317")
-	token := wizard.AskLine(out, stdin, "OTel token", "")
+	ingestEmail := wizard.AskLine(out, stdin, "OTel ingest email (blank for a purely local stack)", defaultEmail)
+	ingestToken := wizard.AskLine(out, stdin, "OTel ingest token", "")
 
 	fmt.Fprintf(out, "  checking %s ... ", endpoint)
 	if err := health.Dial(endpoint, 3*time.Second); err != nil {
@@ -79,7 +84,7 @@ func run() error {
 	}
 	fmt.Fprintln(out, "ok")
 
-	settingsVars, telemetryVars := buildTelemetryVars(endpoint, token)
+	settingsVars, telemetryVars := buildTelemetryVars(endpoint, ingestEmail, ingestToken)
 
 	var collectorVars []envwriter.Var
 	if len(chosen) > 0 {
@@ -122,7 +127,7 @@ func run() error {
 		}
 		if wizard.AskYesNo(out, stdin, "  Also enable telemetry in these Claude Code settings files (existing values of these env keys are overwritten)?", true) {
 			updatedSettings, skippedSettings = writeClaudeSettings(out, targets, settingsVars)
-			if token != "" {
+			if len(telemetryVars) > len(settingsVars) {
 				fmt.Fprintln(out, "  note: the auth token (OTEL_EXPORTER_OTLP_HEADERS) is not written to settings.json;")
 				fmt.Fprintln(out, "  sessions that don't read your shell rc will not authenticate against a gateway-protected endpoint.")
 			}
@@ -202,7 +207,7 @@ func shellRCPath(home string) (path string, shell envwriter.Shell) {
 // OTEL_EXPORTER_OTLP_HEADERS (the auth token) is deliberately only in the
 // latter: settings.json is a plaintext file other tools may read or sync, so
 // the token is not copied into it.
-func buildTelemetryVars(endpoint, token string) (settingsVars, telemetryVars []envwriter.Var) {
+func buildTelemetryVars(endpoint, ingestEmail, ingestToken string) (settingsVars, telemetryVars []envwriter.Var) {
 	settingsVars = []envwriter.Var{
 		{Name: "CLAUDE_CODE_ENABLE_TELEMETRY", Value: "1"},
 		{Name: "OTEL_METRICS_EXPORTER", Value: "otlp"},
@@ -213,12 +218,7 @@ func buildTelemetryVars(endpoint, token string) (settingsVars, telemetryVars []e
 		{Name: "OTEL_LOGS_EXPORT_INTERVAL", Value: "30000"},
 	}
 	telemetryVars = append([]envwriter.Var{}, settingsVars...)
-	if token != "" {
-		telemetryVars = append(telemetryVars, envwriter.Var{
-			Name:  "OTEL_EXPORTER_OTLP_HEADERS",
-			Value: "Authorization=Bearer%20" + token,
-		})
-	}
+	telemetryVars = append(telemetryVars, otelHeaderVars(ingestEmail, ingestToken)...)
 	return settingsVars, telemetryVars
 }
 
@@ -479,4 +479,14 @@ func percentEncodeHeaderValue(s string) string {
 func basicAuthHeaderValue(username, password string) string {
 	raw := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
 	return "Authorization=" + percentEncodeHeaderValue("Basic "+raw)
+}
+
+// otelHeaderVars returns the OTEL_EXPORTER_OTLP_HEADERS var to write, or
+// nil when no ingest credentials were entered (a purely local stack, where
+// nothing validates the header anyway).
+func otelHeaderVars(ingestEmail, ingestToken string) []envwriter.Var {
+	if ingestEmail == "" || ingestToken == "" {
+		return nil
+	}
+	return []envwriter.Var{{Name: "OTEL_EXPORTER_OTLP_HEADERS", Value: basicAuthHeaderValue(ingestEmail, ingestToken)}}
 }

@@ -214,7 +214,7 @@ func TestWriteClaudeSettings_SkipsBadFileAndContinues(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	settingsVars, _ := buildTelemetryVars("http://localhost:47317", "")
+	settingsVars, _ := buildTelemetryVars("http://localhost:47317", "", "")
 	var out bytes.Buffer
 	updated, skipped := writeClaudeSettings(&out, []string{bad, good}, settingsVars)
 
@@ -237,7 +237,7 @@ func TestWriteClaudeSettings_SkipsBadFileAndContinues(t *testing.T) {
 }
 
 func TestBuildTelemetryVars_SettingsMatchesEnvAndExcludesSecretsAndCollectorVars(t *testing.T) {
-	settingsVars, telemetryVars := buildTelemetryVars("http://example:4317", "s3cret")
+	settingsVars, telemetryVars := buildTelemetryVars("http://example:4317", "a@b.co", "s3cret")
 
 	dir := t.TempDir()
 	var out bytes.Buffer
@@ -272,13 +272,13 @@ func TestBuildTelemetryVars_SettingsMatchesEnvAndExcludesSecretsAndCollectorVars
 	}
 
 	last := telemetryVars[len(telemetryVars)-1]
-	if len(telemetryVars) != 8 || last.Name != "OTEL_EXPORTER_OTLP_HEADERS" || last.Value != "Authorization=Bearer%20s3cret" {
+	if len(telemetryVars) != 8 || last.Name != "OTEL_EXPORTER_OTLP_HEADERS" || last.Value != basicAuthHeaderValue("a@b.co", "s3cret") {
 		t.Errorf("rc vars lost the headers entry: %v", telemetryVars)
 	}
 }
 
 func TestBuildTelemetryVars_NoTokenNoHeaders(t *testing.T) {
-	_, telemetryVars := buildTelemetryVars("http://x", "")
+	_, telemetryVars := buildTelemetryVars("http://x", "", "")
 	if len(telemetryVars) != 7 {
 		t.Errorf("got %d vars, want 7", len(telemetryVars))
 	}
@@ -340,7 +340,7 @@ func TestWriteClaudeSettings_ReportsOverwrittenValuesAndRedactsSecrets(t *testin
 
 func TestWriteClaudeSettings_UnchangedIsNotReportedUpdated(t *testing.T) {
 	dir := t.TempDir()
-	settingsVars, _ := buildTelemetryVars("http://x", "")
+	settingsVars, _ := buildTelemetryVars("http://x", "", "")
 	var out bytes.Buffer
 	writeClaudeSettings(&out, []string{dir}, settingsVars)
 	out.Reset()
@@ -377,5 +377,25 @@ func TestBasicAuthHeaderValue_RoundTrips(t *testing.T) {
 	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("alice@example.com:tok 123,="))
 	if decoded != want {
 		t.Errorf("decoded = %q, want %q", decoded, want)
+	}
+}
+
+func TestOtelHeaderVars_EmptyWhenEitherMissing(t *testing.T) {
+	if got := otelHeaderVars("", "tok"); got != nil {
+		t.Errorf("got %v, want nil", got)
+	}
+	if got := otelHeaderVars("alice@example.com", ""); got != nil {
+		t.Errorf("got %v, want nil", got)
+	}
+}
+
+func TestOtelHeaderVars_BuildsBasicAuthWhenBothSet(t *testing.T) {
+	got := otelHeaderVars("alice@example.com", "tok123")
+	if len(got) != 1 || got[0].Name != "OTEL_EXPORTER_OTLP_HEADERS" {
+		t.Fatalf("got %v, want one OTEL_EXPORTER_OTLP_HEADERS var", got)
+	}
+	want := basicAuthHeaderValue("alice@example.com", "tok123")
+	if got[0].Value != want {
+		t.Errorf("Value = %q, want %q", got[0].Value, want)
 	}
 }
