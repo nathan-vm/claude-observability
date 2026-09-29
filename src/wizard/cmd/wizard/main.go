@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
@@ -447,4 +448,35 @@ func hasArg(name string) bool {
 		}
 	}
 	return false
+}
+
+// percentEncodeHeaderValue percent-encodes s per RFC 3986 unreserved
+// characters (A-Za-z0-9-._~) only — every other byte, including the ","
+// and "=" the OTLP header-list format (OTEL_EXPORTER_OTLP_HEADERS) uses as
+// its own delimiters, becomes %XX. This guarantees the encoded value can't
+// be misread as extra key=value pairs regardless of exactly how/when the
+// receiving SDK splits vs. percent-decodes it.
+func percentEncodeHeaderValue(s string) string {
+	const hex = "0123456789ABCDEF"
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' || c == '~' {
+			b.WriteByte(c)
+			continue
+		}
+		b.WriteByte('%')
+		b.WriteByte(hex[c>>4])
+		b.WriteByte(hex[c&0x0f])
+	}
+	return b.String()
+}
+
+// basicAuthHeaderValue builds the OTEL_EXPORTER_OTLP_HEADERS entry for HTTP
+// Basic Auth — Caddy's basic_auth directive validates this at the gateway
+// (see docs/superpowers/specs/2026-09-29-production-auth-gateway-design.md).
+// Replaces the old Bearer-token entry, which nothing ever validated.
+func basicAuthHeaderValue(username, password string) string {
+	raw := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
+	return "Authorization=" + percentEncodeHeaderValue("Basic "+raw)
 }

@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -345,5 +347,35 @@ func TestWriteClaudeSettings_UnchangedIsNotReportedUpdated(t *testing.T) {
 	updated, skipped := writeClaudeSettings(&out, []string{dir}, settingsVars)
 	if len(updated) != 0 || len(skipped) != 0 || !strings.Contains(out.String(), "already up to date") {
 		t.Errorf("updated=%v skipped=%v out=%q", updated, skipped, out.String())
+	}
+}
+
+func TestPercentEncodeHeaderValue(t *testing.T) {
+	cases := map[string]string{
+		"Basic dGVzdA==": "Basic%20dGVzdA%3D%3D",
+		"a,b":             "a%2Cb",
+		"a=b":             "a%3Db",
+		"simple":          "simple",
+	}
+	for in, want := range cases {
+		if got := percentEncodeHeaderValue(in); got != want {
+			t.Errorf("percentEncodeHeaderValue(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestBasicAuthHeaderValue_RoundTrips(t *testing.T) {
+	got := basicAuthHeaderValue("alice@example.com", "tok 123,=")
+	const prefix = "Authorization="
+	if !strings.HasPrefix(got, prefix) {
+		t.Fatalf("got %q, want prefix %q", got, prefix)
+	}
+	decoded, err := url.QueryUnescape(strings.TrimPrefix(got, prefix))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("alice@example.com:tok 123,="))
+	if decoded != want {
+		t.Errorf("decoded = %q, want %q", decoded, want)
 	}
 }
