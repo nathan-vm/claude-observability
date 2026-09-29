@@ -399,3 +399,34 @@ func TestOtelHeaderVars_BuildsBasicAuthWhenBothSet(t *testing.T) {
 		t.Errorf("Value = %q, want %q", got[0].Value, want)
 	}
 }
+
+func TestLokiIngestURL_UnchangedWhenNoCredentials(t *testing.T) {
+	got, err := lokiIngestURL("http://localhost:47100", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "http://localhost:47100" {
+		t.Errorf("got %q, want endpoint unchanged", got)
+	}
+}
+
+func TestLokiIngestURL_EmbedsCredentials(t *testing.T) {
+	got, err := lokiIngestURL("https://loki-ingest.example.com", "alice@example.com", "tok:123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.User.Username() != "alice@example.com" {
+		t.Errorf("username = %q, want %q", parsed.User.Username(), "alice@example.com")
+	}
+	password, ok := parsed.User.Password()
+	if !ok || password != "tok:123" {
+		t.Errorf("password = %q (set=%v), want %q", password, ok, "tok:123")
+	}
+	if parsed.Scheme != "https" || parsed.Host != "loki-ingest.example.com" {
+		t.Errorf("got %q, want scheme/host preserved", got)
+	}
+}

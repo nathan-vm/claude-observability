@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -105,6 +106,16 @@ func run() error {
 			return err
 		}
 		collectorVars = append(collectorVars, envwriter.Var{Name: "EXPORTER_STREAM", Value: streamValue})
+
+		fmt.Fprintln(out, "\n── Loki ingest (collector) ─────────────────────────────────")
+		lokiEndpoint := wizard.AskLine(out, stdin, "Loki endpoint", "http://localhost:47100")
+		lokiEmail := wizard.AskLine(out, stdin, "Loki ingest email (blank for a purely local stack)", defaultEmail)
+		lokiToken := wizard.AskLine(out, stdin, "Loki ingest token", "")
+		lokiURLValue, err := lokiIngestURL(lokiEndpoint, lokiEmail, lokiToken)
+		if err != nil {
+			return err
+		}
+		collectorVars = append(collectorVars, envwriter.Var{Name: "LOKI_URL", Value: lokiURLValue})
 	}
 
 	allVars := append(append([]envwriter.Var{}, telemetryVars...), collectorVars...)
@@ -489,4 +500,22 @@ func otelHeaderVars(ingestEmail, ingestToken string) []envwriter.Var {
 		return nil
 	}
 	return []envwriter.Var{{Name: "OTEL_EXPORTER_OTLP_HEADERS", Value: basicAuthHeaderValue(ingestEmail, ingestToken)}}
+}
+
+// lokiIngestURL builds the collector's LOKI_URL: endpoint unchanged when no
+// credentials were entered (a purely local stack), or endpoint with
+// username:password embedded as URL userinfo otherwise. Go's net/http
+// client applies HTTP Basic Auth from a URL's userinfo automatically (see
+// docs/superpowers/specs/2026-09-29-production-auth-gateway-design.md), so
+// src/collector needs no code change — only this value changes.
+func lokiIngestURL(endpoint, username, password string) (string, error) {
+	if username == "" || password == "" {
+		return endpoint, nil
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return "", fmt.Errorf("invalid Loki endpoint %q: %w", endpoint, err)
+	}
+	u.User = url.UserPassword(username, password)
+	return u.String(), nil
 }
