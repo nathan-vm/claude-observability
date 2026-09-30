@@ -8,7 +8,7 @@
 
 **Tech Stack:** Markdown only. Verification uses `grep`, `go build`, `docker compose config`, and manual comparison against `docker-compose.yaml`, the three `src/*/cmd/*/main.go` entrypoints, and `.github/workflows/*.yml`.
 
-**Spec:** `docs/superpowers/specs/2026-09-24-readme-rewrite.md`
+**Spec:** `docs/specs/2026-09-24-readme-rewrite.md`
 
 ## Global Constraints
 
@@ -16,7 +16,7 @@
 - Every command, path, port, env var name, and binary name written into the README must be verified against current source, not copied from the old README on faith.
 - Every internal Markdown anchor link used (e.g. `#faq`) must resolve to a real heading in the new file.
 - Do not add a `LICENSE` or `CONTRIBUTING.md` — out of scope for this plan.
-- Do not delete `docs/superpowers/specs/2026-09-23-*.md` (collector/dash-generator/wizard design specs) — the new README intentionally defers deep detail to them; they must keep existing.
+- Do not delete `docs/specs/2026-09-23-*.md` (collector/dash-generator/wizard design specs) — the new README intentionally defers deep detail to them; they must keep existing.
 
 ---
 
@@ -361,7 +361,7 @@ Expected: `wc -l` reports roughly 230–260 lines; the code-fence count is even 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add README.md docs/superpowers/specs/2026-09-24-readme-rewrite.md docs/superpowers/plans/2026-09-24-readme-rewrite.md
+git add README.md docs/specs/2026-09-24-readme-rewrite.md docs/plans/2026-09-24-readme-rewrite.md
 git commit -m "docs: rewrite README for open-source audience"
 ```
 

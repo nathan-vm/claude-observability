@@ -22,8 +22,8 @@ Unlike both reference repos, `claude-observability` has no external task
 backlog (tasks come from the conversation directly) and is a 3-module Go
 monorepo with a single `docker-compose.yaml`, not a JS/pnpm monorepo — the
 designs below are adapted accordingly. This repo also already has its own
-Superpowers-driven planning history (`docs/superpowers/specs/` and
-`docs/superpowers/plans/` from the collector/dash-generator/wizard work),
+Superpowers-driven planning history (`docs/specs/` and
+`docs/plans/` from the collector/dash-generator/wizard work),
 so the `planner` subagent uses that same workflow rather than inventing a
 separate one.
 
@@ -37,7 +37,7 @@ separate one.
   steps and the development step.
 - The `planner` subagent produces its plan the way this repo already
   does — via Superpowers (`brainstorming` + `writing-plans`), landing as
-  a real `docs/superpowers/plans/*.md` file — not an ad hoc breakdown.
+  a real `docs/plans/*.md` file — not an ad hoc breakdown.
 - Superpowers is available to subagents without depending on the user's
   personal, machine-local `~/.claude-personal/settings.json` — declared
   in this project's own `.claude/settings.json` instead.
@@ -201,7 +201,7 @@ Read-only (`Read, Grep, Glob, Skill`). Given a request, it invokes
 `superpowers:brainstorming` (skipping straight to a short in-chat design
 only for genuinely bounded changes, per that skill's own path
 classification) and then `superpowers:writing-plans` to produce the
-actual plan, saved as `docs/superpowers/plans/YYYY-MM-DD-<slug>.md` —
+actual plan, saved as `docs/plans/YYYY-MM-DD-<slug>.md` —
 matching this repo's existing convention. Returns the plan file path to
 the orchestrator; does not implement anything.
 

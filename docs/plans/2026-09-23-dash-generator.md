@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.22 (standard library only), same GitHub Actions test/release pattern as `setup/`.
 
-**Spec:** `docs/superpowers/specs/2026-09-23-dash-generator-design.md`
+**Spec:** `docs/specs/2026-09-23-dash-generator-design.md`
 
 ## Global Constraints
 
