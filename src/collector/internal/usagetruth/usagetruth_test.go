@@ -232,10 +232,16 @@ func TestPublish_PutsResetTextInLineBodyNotMetadata(t *testing.T) {
 	// Structured metadata (Loki's `unwrap` target set): numeric fields
 	// only. A free-text field here would fan one logical series into one
 	// result series per distinct wording at query time — see the comment
-	// at publish's Metadata map.
+	// at publish's Metadata map. week_reset_unix_ms is the one exception
+	// to "numeric fields only come from percentages": it's a parsed
+	// absolute timestamp, safe for the same reason session_pct/week_pct
+	// are.
 	metadata, _ := entry[2].(map[string]interface{})
-	if len(metadata) != 2 || metadata["session_pct"] != "13" || metadata["week_pct"] != "42" {
-		t.Errorf("metadata = %v, want exactly session_pct=13, week_pct=42", metadata)
+	if len(metadata) != 3 || metadata["session_pct"] != "13" || metadata["week_pct"] != "42" {
+		t.Errorf("metadata = %v, want exactly session_pct=13, week_pct=42, week_reset_unix_ms=<parsed>", metadata)
+	}
+	if _, ok := metadata["week_reset_unix_ms"]; !ok {
+		t.Errorf("metadata = %v, want week_reset_unix_ms present (WeekReset parses)", metadata)
 	}
 	for _, forbidden := range []string{"session_reset_text", "week_reset_text"} {
 		if _, ok := metadata[forbidden]; ok {
@@ -253,6 +259,83 @@ func TestPublish_PutsResetTextInLineBodyNotMetadata(t *testing.T) {
 	}
 	if body.SessionResetText != usage.SessionReset || body.WeekResetText != usage.WeekReset {
 		t.Errorf("line body = %+v, want reset texts %q / %q", body, usage.SessionReset, usage.WeekReset)
+	}
+}
+
+func TestPublish_OmitsWeekResetUnixMsWhenWeekResetEmpty(t *testing.T) {
+	var pushed map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&pushed)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	usage := Usage{SessionPct: 0, SessionReset: "", WeekPct: 0, WeekReset: ""}
+	if err := publish(srv.URL, "a@example.com", usage); err != nil {
+		t.Fatal(err)
+	}
+
+	streams, _ := pushed["streams"].([]interface{})
+	values, _ := streams[0].(map[string]interface{})["values"].([]interface{})
+	entry, _ := values[0].([]interface{})
+	metadata, _ := entry[2].(map[string]interface{})
+	if len(metadata) != 2 {
+		t.Errorf("metadata = %v, want exactly 2 keys (no week_reset_unix_ms when WeekReset is empty)", metadata)
+	}
+	if _, ok := metadata["week_reset_unix_ms"]; ok {
+		t.Errorf("metadata = %v, want week_reset_unix_ms absent, not zero/stale", metadata)
+	}
+}
+
+func TestParseWeekReset_StandardFormat(t *testing.T) {
+	now := time.Date(2026, time.September, 22, 12, 0, 0, 0, time.UTC)
+	got, ok := parseWeekReset("resets Sep 24 at 7:59pm (America/Sao_Paulo)", now)
+	if !ok {
+		t.Fatal("parseWeekReset() ok = false, want true")
+	}
+	loc, _ := time.LoadLocation("America/Sao_Paulo")
+	want := time.Date(2026, time.September, 24, 19, 59, 0, 0, loc)
+	if !got.Equal(want) {
+		t.Errorf("parseWeekReset() = %v, want %v", got, want)
+	}
+}
+
+func TestParseWeekReset_NoMinutes(t *testing.T) {
+	now := time.Date(2026, time.September, 30, 12, 0, 0, 0, time.UTC)
+	got, ok := parseWeekReset("resets Oct 3 at 2pm (America/Sao_Paulo)", now)
+	if !ok {
+		t.Fatal("parseWeekReset() ok = false, want true")
+	}
+	loc, _ := time.LoadLocation("America/Sao_Paulo")
+	want := time.Date(2026, time.October, 3, 14, 0, 0, 0, loc)
+	if !got.Equal(want) {
+		t.Errorf("parseWeekReset() = %v, want %v", got, want)
+	}
+}
+
+func TestParseWeekReset_YearRollover(t *testing.T) {
+	now := time.Date(2026, time.December, 28, 12, 0, 0, 0, time.UTC)
+	got, ok := parseWeekReset("resets Jan 2 at 9am (America/Sao_Paulo)", now)
+	if !ok {
+		t.Fatal("parseWeekReset() ok = false, want true")
+	}
+	loc, _ := time.LoadLocation("America/Sao_Paulo")
+	want := time.Date(2027, time.January, 2, 9, 0, 0, 0, loc)
+	if !got.Equal(want) {
+		t.Errorf("parseWeekReset() = %v, want %v (rolled into next year)", got, want)
+	}
+}
+
+func TestParseWeekReset_UnknownFormatReturnsFalse(t *testing.T) {
+	now := time.Date(2026, time.September, 22, 12, 0, 0, 0, time.UTC)
+	if _, ok := parseWeekReset("", now); ok {
+		t.Error("parseWeekReset(\"\") ok = true, want false")
+	}
+	if _, ok := parseWeekReset("resets soon", now); ok {
+		t.Error(`parseWeekReset("resets soon") ok = true, want false`)
+	}
+	if _, ok := parseWeekReset("resets Sep 24 at 7:59pm (Not/AZone)", now); ok {
+		t.Error("parseWeekReset() with unknown IANA zone ok = true, want false")
 	}
 }
 
