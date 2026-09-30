@@ -14,7 +14,7 @@ not authentication), Grafana runs with
 `GF_AUTH_ANONYMOUS_ENABLED=true`/`admin`/`admin`, and the OTel Collector's
 OTLP receiver accepts anything sent to it.
 
-This is project #2 from `docs/superpowers/specs/2026-09-23-local-setup-wizard-design.md`'s
+This is project #2 from `docs/specs/2026-09-23-local-setup-wizard-design.md`'s
 "Open items" — moving Grafana/Loki/OTel Collector onto a real server that
 multiple people's machines send data to, protected by auth instead of by
 being unreachable. That spec explicitly deferred per-user OTLP tokens,

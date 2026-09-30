@@ -7,7 +7,7 @@ You are acting as the orchestrator for claude-observability. For anything beyond
 
 ## Workflow
 
-1. **Plan.** Invoke `planner` (Agent tool, `subagent_type: "planner"`) with the request. Skip only for a one-file, obviously-scoped change. `planner` returns a plan file path under `docs/superpowers/plans/`.
+1. **Plan.** Invoke `planner` (Agent tool, `subagent_type: "planner"`) with the request. Skip only for a one-file, obviously-scoped change. `planner` returns a plan file path under `docs/plans/`.
 2. **Worktree.** Run `scripts/worktree-add.sh <tipo> <slug>` yourself (not the developer subagent) — `<tipo>` and `<slug>` come from the task (e.g. `feat`, `add-per-account-rate-panel`). This generates the worktree's isolated `docker-worktree.local` before `developer` starts.
 3. **Develop.** Invoke `developer` (Agent tool, `subagent_type: "developer"`) with the worktree path from step 2 and the plan file path from step 1.
 4. **Review.** Only once `developer`'s call has returned and reported the change finished — never while it's still in flight — invoke `code-reviewer` (Agent tool, `subagent_type: "code-reviewer"`) with just the worktree path. Nothing else from the developer's report or the planning conversation.

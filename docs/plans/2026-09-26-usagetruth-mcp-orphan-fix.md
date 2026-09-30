@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.22 (module `claude-observability-collector`), standard library only (`os/exec`, `syscall`, `context`, `time`), existing `testing` package style (no testify/mocking) — real-subprocess-on-PATH fixtures, matching `usagetruth_test.go`'s existing pattern.
 
-**Spec:** No separate spec file — bounded-path fix. Grounding source: `src/collector/internal/usagetruth/usagetruth.go`, `src/collector/internal/usagetruth/usagetruth_test.go`, `src/collector/cmd/collector/main.go`, `src/collector/go.mod`, `src/wizard/internal/service/*` (per-OS build-tag style reference), `docs/superpowers/plans/2026-09-26-exporter-stream-reuse.md` (format reference).
+**Spec:** No separate spec file — bounded-path fix. Grounding source: `src/collector/internal/usagetruth/usagetruth.go`, `src/collector/internal/usagetruth/usagetruth_test.go`, `src/collector/cmd/collector/main.go`, `src/collector/go.mod`, `src/wizard/internal/service/*` (per-OS build-tag style reference), `docs/plans/2026-09-26-exporter-stream-reuse.md` (format reference).
 
 ---
 

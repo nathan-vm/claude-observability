@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.22 (standard library only), GitHub Actions (test matrix + release build/publish).
 
-**Spec:** `docs/superpowers/specs/2026-09-23-local-setup-wizard-design.md`
+**Spec:** `docs/specs/2026-09-23-local-setup-wizard-design.md`
 
 ## Global Constraints
 

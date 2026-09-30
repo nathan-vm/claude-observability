@@ -1,7 +1,7 @@
 // Package lokiclient talks to Loki for the collector: log-line range
 // queries (Loki's "streams" result type) and pushing new log lines. Not
 // the same shape as dash-generator's client — see the spec correction in
-// docs/superpowers/specs/2026-09-23-collector-design.md.
+// docs/specs/2026-09-23-collector-design.md.
 package lokiclient
 
 import (

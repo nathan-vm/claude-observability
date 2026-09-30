@@ -8,7 +8,7 @@
 
 **Tech Stack:** GitHub Actions, `docker/build-push-action` + Buildx/QEMU, `zip`, Docker Compose.
 
-**Spec:** `docs/superpowers/specs/2026-09-25-release-packaging-dockerhub-design.md`
+**Spec:** `docs/specs/2026-09-25-release-packaging-dockerhub-design.md`
 
 ## Global Constraints
 
@@ -121,7 +121,7 @@ name: claude-observability-dev
 # published image, and every default port is in the 40xxx range instead of
 # 47xxx so this can run at the same time as the "prod" file without colliding
 # on ports or on container/network/volume identity (distinct `name:` above).
-# See docs/superpowers/specs/2026-09-25-release-packaging-dockerhub-design.md.
+# See docs/specs/2026-09-25-release-packaging-dockerhub-design.md.
 #
 # Every port is published on 127.0.0.1 only, same reasoning as
 # docker-compose.yaml: unauthenticated Grafana/Loki/OTLP access has no
@@ -459,7 +459,7 @@ Expected: `OK`
 
 - [ ] **Step 5: Diff-review against the spec**
 
-Re-read `docs/superpowers/specs/2026-09-25-release-packaging-dockerhub-design.md`'s "Docker publish: new `docker` job" section side by side with the file and confirm every piece matches: gated on `compute-version`'s `bumped` output, QEMU+Buildx+login+build-push steps in that order, `context: src/dash-generator`, both platforms, both tags, GHA cache.
+Re-read `docs/specs/2026-09-25-release-packaging-dockerhub-design.md`'s "Docker publish: new `docker` job" section side by side with the file and confirm every piece matches: gated on `compute-version`'s `bumped` output, QEMU+Buildx+login+build-push steps in that order, `context: src/dash-generator`, both platforms, both tags, GHA cache.
 
 - [ ] **Step 6: Commit**
 

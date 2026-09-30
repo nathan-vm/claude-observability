@@ -8,7 +8,7 @@
 
 **Tech Stack:** GitHub Actions, bash, Go 1.25 `-ldflags`.
 
-**Spec:** `docs/superpowers/specs/2026-09-24-trunk-based-release-design.md`
+**Spec:** `docs/specs/2026-09-24-trunk-based-release-design.md`
 
 ## Global Constraints
 
@@ -647,7 +647,7 @@ Expected: `OK`
 
 - [ ] **Step 3: Diff-review against the spec's Design section**
 
-Re-read `docs/superpowers/specs/2026-09-24-trunk-based-release-design.md`'s "Design" section side by side with the new `release.yml` and confirm every piece is present: trigger on `push: branches: [main]`, `[skip ci]` guard, `concurrency` block, `compute-version` job producing `version`/`bumped`/`changelog`, all three build jobs gated on `bumped == 'true'` and passing the ldflag, and the `release` job using `tag_name`/`body` from `compute-version`'s outputs.
+Re-read `docs/specs/2026-09-24-trunk-based-release-design.md`'s "Design" section side by side with the new `release.yml` and confirm every piece is present: trigger on `push: branches: [main]`, `[skip ci]` guard, `concurrency` block, `compute-version` job producing `version`/`bumped`/`changelog`, all three build jobs gated on `bumped == 'true'` and passing the ldflag, and the `release` job using `tag_name`/`body` from `compute-version`'s outputs.
 
 - [ ] **Step 4: Commit**
 

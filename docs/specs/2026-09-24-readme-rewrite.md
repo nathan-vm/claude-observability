@@ -42,7 +42,7 @@ centrally, and how to get it running* — not read a post-mortem.
 - Not preserving every fact from the old README. Exact measured numbers,
   one-off bug post-mortems, and step-by-step derivations that belong in
   code comments or the existing design specs
-  (`docs/superpowers/specs/2026-09-23-*.md`) are cut, not migrated.
+  (`docs/specs/2026-09-23-*.md`) are cut, not migrated.
 
 ## Structure decision
 

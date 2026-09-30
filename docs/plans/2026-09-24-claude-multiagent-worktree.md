@@ -8,7 +8,7 @@
 
 **Tech Stack:** bash, Docker Compose, Claude Code `.claude/` config (settings, hooks, agents, skills).
 
-**Spec:** `docs/superpowers/specs/2026-09-24-claude-multiagent-worktree-design.md`
+**Spec:** `docs/specs/2026-09-24-claude-multiagent-worktree-design.md`
 
 ## Global Constraints
 
@@ -380,7 +380,7 @@ project does; this file is about how to work on it with Claude Code.
   GitHub Release with the three binaries.
 - Never hand-edit a version anywhere — there's nowhere to edit; it's
   derived from `v*` git tags at release time.
-- See `docs/superpowers/specs/2026-09-24-trunk-based-release-design.md`
+- See `docs/specs/2026-09-24-trunk-based-release-design.md`
   for the full design.
 
 ## Worktree + docker isolation
@@ -397,7 +397,7 @@ project does; this file is about how to work on it with Claude Code.
 - The **collector** is a host process (reads local transcripts, runs the
   logged-in `claude` CLI) — it never runs in docker-compose, isolated or
   not.
-- See `docs/superpowers/specs/2026-09-24-claude-multiagent-worktree-design.md`
+- See `docs/specs/2026-09-24-claude-multiagent-worktree-design.md`
   for the full design.
 
 ## Multi-agent workflow
@@ -405,7 +405,7 @@ project does; this file is about how to work on it with Claude Code.
 For any non-trivial feature, fix, or refactor, invoke the `orchestrator`
 skill instead of implementing directly. It runs: `planner` (produces a
 real plan via Superpowers `brainstorming`/`writing-plans`, saved to
-`docs/superpowers/plans/`) → creates the isolated worktree → `developer`
+`docs/plans/`) → creates the isolated worktree → `developer`
 (implements, `go build`/`go test`/`go vet`) → `code-reviewer` (fresh
 context, diff-only) → `qa` (conditional, only for user/tool-facing
 changes).
@@ -546,7 +546,7 @@ You are the planning subagent for claude-observability. You receive a request fr
 
 1. Read the relevant source under `src/wizard`, `src/collector`, `src/dash-generator`, and `grafana/`/`config/` as needed, to ground the plan in what actually exists, not assumptions.
 2. Invoke the `superpowers:brainstorming` skill for the request — it classifies the work (spike/bounded/architectural) and gets a design approved before any plan is written. For a genuinely bounded, well-scoped change it may resolve with just a short in-chat design; that's expected, not a shortcut you're taking.
-3. Once a design is approved (per that skill's own gate), invoke `superpowers:writing-plans` to produce the actual implementation plan, saved to `docs/superpowers/plans/YYYY-MM-DD-<slug>.md` — this repo's existing convention (see `docs/superpowers/plans/` for examples from the collector/dash-generator/wizard work).
+3. Once a design is approved (per that skill's own gate), invoke `superpowers:writing-plans` to produce the actual implementation plan, saved to `docs/plans/YYYY-MM-DD-<slug>.md` — this repo's existing convention (see `docs/plans/` for examples from the collector/dash-generator/wizard work).
 4. Flag anything that blocks planning (ambiguous requirement, missing context) instead of guessing past it.
 5. Note any conventions from `CLAUDE.md` that constrain the approach (trunk-based release rules, worktree/docker isolation, no hand-edited version).
 6. Return the plan file's path to the orchestrator.
@@ -747,7 +747,7 @@ You are acting as the orchestrator for claude-observability. For anything beyond
 
 ## Workflow
 
-1. **Plan.** Invoke `planner` (Agent tool, `subagent_type: "planner"`) with the request. Skip only for a one-file, obviously-scoped change. `planner` returns a plan file path under `docs/superpowers/plans/`.
+1. **Plan.** Invoke `planner` (Agent tool, `subagent_type: "planner"`) with the request. Skip only for a one-file, obviously-scoped change. `planner` returns a plan file path under `docs/plans/`.
 2. **Worktree.** Run `scripts/worktree-add.sh <tipo> <slug>` yourself (not the developer subagent) — `<tipo>` and `<slug>` come from the task (e.g. `feat`, `add-per-account-rate-panel`). This generates the worktree's isolated `docker-worktree.local` before `developer` starts.
 3. **Develop.** Invoke `developer` (Agent tool, `subagent_type: "developer"`) with the worktree path from step 2 and the plan file path from step 1.
 4. **Review.** Only once `developer`'s call has returned and reported the change finished — never while it's still in flight — invoke `code-reviewer` (Agent tool, `subagent_type: "code-reviewer"`) with just the worktree path. Nothing else from the developer's report or the planning conversation.
@@ -838,4 +838,4 @@ git branch -D test/e2e-validation-alpha test/e2e-validation-beta
 
 ## Post-implementation note (not a task — informational)
 
-Validating the full `orchestrator` pipeline (planner → worktree → developer → code-reviewer → qa) end-to-end requires actually invoking it on a real task after this plan is merged — that's a live multi-agent run, not a scriptable plan step. The natural first exercise is the next genuinely non-trivial change made to this repo: invoke `/orchestrator` (or the `orchestrator` skill directly) instead of working inline, and confirm each stage behaves as designed (a plan file appears under `docs/superpowers/plans/`, a worktree appears under `.worktrees/`, `code-reviewer` reports something concrete, `qa` runs only when warranted).
+Validating the full `orchestrator` pipeline (planner → worktree → developer → code-reviewer → qa) end-to-end requires actually invoking it on a real task after this plan is merged — that's a live multi-agent run, not a scriptable plan step. The natural first exercise is the next genuinely non-trivial change made to this repo: invoke `/orchestrator` (or the `orchestrator` skill directly) instead of working inline, and confirm each stage behaves as designed (a plan file appears under `docs/plans/`, a worktree appears under `.worktrees/`, `code-reviewer` reports something concrete, `qa` runs only when warranted).

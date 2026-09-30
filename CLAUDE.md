@@ -4,6 +4,16 @@ Self-hosted Claude Code usage dashboards (Go monorepo: `src/wizard`,
 `src/collector`, `src/dash-generator`). See `README.md` for what the
 project does; this file is about how to work on it with Claude Code.
 
+## Docs layout
+
+- `docs/plans/YYYY-MM-DD-<slug>.md` — implementation plans (what changes,
+  where, how it's verified), one per feature/fix/refactor.
+- `docs/specs/YYYY-MM-DD-<slug>[-design].md` — design specs for larger
+  pieces of work.
+- `docs/adr/NNNN-<slug>.md` — Architecture Decision Records for
+  significant technical decisions worth recording on their own (see
+  `docs/adr/README.md` for the convention). Not every plan needs one.
+
 ## Release conventions (trunk-based)
 
 - Every commit reaching `main` is a squash-merge commit — its subject is
@@ -17,7 +27,7 @@ project does; this file is about how to work on it with Claude Code.
   GitHub Release with the three binaries.
 - Never hand-edit a version anywhere — there's nowhere to edit; it's
   derived from `v*` git tags at release time.
-- See `docs/superpowers/specs/2026-09-24-trunk-based-release-design.md`
+- See `docs/specs/2026-09-24-trunk-based-release-design.md`
   for the full design.
 
 ## Worktree + docker isolation
@@ -34,7 +44,7 @@ project does; this file is about how to work on it with Claude Code.
 - The **collector** is a host process (reads local transcripts, runs the
   logged-in `claude` CLI) — it never runs in docker-compose, isolated or
   not.
-- See `docs/superpowers/specs/2026-09-24-claude-multiagent-worktree-design.md`
+- See `docs/specs/2026-09-24-claude-multiagent-worktree-design.md`
   for the full design.
 
 ## Testing against Loki
@@ -89,9 +99,9 @@ again so several worktrees can run at once.
 ## Multi-agent workflow
 
 For any non-trivial feature, fix, or refactor, invoke the `orchestrator`
-skill instead of implementing directly. It runs: `planner` (produces a
-real plan via Superpowers `brainstorming`/`writing-plans`, saved to
-`docs/superpowers/plans/`) → creates the isolated worktree → `developer`
+skill instead of implementing directly. It runs: `planner` (reads the
+actual code, designs directly, and writes the plan itself, saved to
+`docs/plans/`) → creates the isolated worktree → `developer`
 (implements, `go build`/`go test`/`go vet`) → `code-reviewer` (fresh
 context, diff-only) → `qa` (conditional, only for user/tool-facing
 changes).
@@ -99,11 +109,6 @@ changes).
 All four subagents are pinned to Sonnet, effort high. Escalating beyond
 that (Opus, or higher effort) is never an agent's call alone — ask the
 user first.
-
-This repo's `.claude/settings.json` auto-enables the `superpowers-dev`
-marketplace (`github.com/obra/superpowers`) for any session opened
-here, tracking its default branch with no version pin — worth knowing
-for supply-chain awareness.
 
 ## Go module layout
 
