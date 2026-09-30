@@ -234,6 +234,37 @@ func rateCutlines(lokiURL, exporterStream, rateHalfLife, email, field string) Cu
 	}
 }
 
+// weekResetQuickRangeDisplay is the fixed name scopeAccount uses for the
+// "Since last reset" quick-range entry it injects/replaces in place — never
+// duplicated because it's the lookup key used to drop any prior copy before
+// re-prepending.
+const weekResetQuickRangeDisplay = "Since last reset (from /usage)"
+
+// lastWeekReset fetches the account's most recently published
+// week_reset_unix_ms (collector's honest transcription of /usage's *next*
+// reset clause) and subtracts 7 days to get the start of the account's
+// current week — Anthropic's weekly window is a fixed 7-day cycle, so
+// "next reset - 7d" is "last reset." This subtraction is a display-time
+// interpretation specific to this one panel, not a fact collector should
+// bake into what it publishes. Returns ok=false on any Loki error, no
+// data yet for this account, or an unparseable value — callers must never
+// inject a stale/fabricated entry in that case.
+func lastWeekReset(lokiURL, email string) (time.Time, bool) {
+	expr := fmt.Sprintf(
+		"sum(last_over_time({service_name=\"claude-code-usage-truth\"} | user_email =~ `%s` | unwrap week_reset_unix_ms [7d]) by (user_email))",
+		escapeRegex(email))
+	series, err := lokiclient.Query(lokiURL, expr, time.Now().Unix())
+	if err != nil || len(series) == 0 || len(series[0].Values) == 0 {
+		return time.Time{}, false
+	}
+	ms, err := strconv.ParseFloat(series[0].Values[0][1], 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	nextReset := time.UnixMilli(int64(ms)).UTC()
+	return nextReset.Add(-7 * 24 * time.Hour), true
+}
+
 // Option is one dropdown-filter choice (a value plus its display text).
 type Option struct {
 	Text, Value string
@@ -391,9 +422,11 @@ func loadLimits(path string) (map[string]interface{}, error) {
 // account, injects cutlines into thresholds AND into the LogQL expressions
 // themselves (the rate panel filters by cutline in-query, not just at
 // display time), rewrites drill-down links to point at this account's own
-// uid, and replaces the MCP-server/skill-owner filter options with what
-// this account actually used.
-func scopeAccount(template map[string]interface{}, email string, cutlines AllCutlines,
+// uid, replaces the MCP-server/skill-owner filter options with what this
+// account actually used, and — when collector has ever published a
+// week_reset_unix_ms for this account — prepends a "Since last reset"
+// quick-range option tracking its real weekly boundary.
+func scopeAccount(template map[string]interface{}, lokiURL, email string, cutlines AllCutlines,
 	servers []string, owners []Option, exporterStream, rateHalfLife string,
 ) (map[string]interface{}, error) {
 	data, err := json.Marshal(template)
@@ -509,6 +542,28 @@ func scopeAccount(template map[string]interface{}, email string, cutlines AllCut
 	replaceVariable(dashboard, filter("server", "MCP server", serverOptions))
 	replaceVariable(dashboard, filter("owner", "Skill owner", owners))
 
+	if reset, ok := lastWeekReset(lokiURL, email); ok {
+		timepicker, ok := dashboard["timepicker"].(map[string]interface{})
+		if !ok {
+			timepicker = map[string]interface{}{}
+			dashboard["timepicker"] = timepicker
+		}
+		quickRanges, _ := timepicker["quick_ranges"].([]interface{})
+		kept := quickRanges[:0:0]
+		for _, qr := range quickRanges {
+			if m, ok := qr.(map[string]interface{}); ok && m["display"] == weekResetQuickRangeDisplay {
+				continue
+			}
+			kept = append(kept, qr)
+		}
+		entry := map[string]interface{}{
+			"display": weekResetQuickRangeDisplay,
+			"from":    reset.UTC().Format("2006-01-02T15:04:05.000Z"),
+			"to":      "now",
+		}
+		timepicker["quick_ranges"] = append([]interface{}{entry}, kept...)
+	}
+
 	if err := assertNoPlaceholders(dashboard); err != nil {
 		return nil, err
 	}
@@ -578,7 +633,7 @@ func GenerateDashboards(cfg Config, log func(string, ...any)) error {
 		servers := mcpServers(cfg.LokiURL, cfg.ExporterStream, email)
 		owners := skillOwners(cfg.LokiURL, cfg.ExporterStream, email)
 
-		dashboard, err := scopeAccount(template, email, AllCutlines{total, input, output}, servers, owners,
+		dashboard, err := scopeAccount(template, cfg.LokiURL, email, AllCutlines{total, input, output}, servers, owners,
 			cfg.ExporterStream, cfg.RateHalfLife)
 		if err != nil {
 			return err

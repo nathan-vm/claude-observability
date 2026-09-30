@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSlug(t *testing.T) {
@@ -236,6 +237,60 @@ func TestMcpServers_ReturnsSortedNames(t *testing.T) {
 	}
 }
 
+func TestLastWeekReset_SubtractsSevenDaysFromLatestValue(t *testing.T) {
+	nextResetMs := int64(1_800_000_000_000)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"status":"success","data":{"resultType":"vector","result":[
+			{"metric":{"user_email":"a@example.com"},"value":[1700000000,"%d"]}
+		]}}`, nextResetMs)
+	}))
+	defer srv.Close()
+
+	got, ok := lastWeekReset(srv.URL, "a@example.com")
+	if !ok {
+		t.Fatal("lastWeekReset() ok = false, want true")
+	}
+	want := time.UnixMilli(nextResetMs).UTC().Add(-7 * 24 * time.Hour)
+	if !got.Equal(want) {
+		t.Errorf("lastWeekReset() = %v, want %v (next reset minus 7 days)", got, want)
+	}
+}
+
+func TestLastWeekReset_NoDataReturnsFalse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[]}}`))
+	}))
+	defer srv.Close()
+
+	if _, ok := lastWeekReset(srv.URL, "a@example.com"); ok {
+		t.Error("lastWeekReset() ok = true, want false when no data published yet")
+	}
+}
+
+func TestLastWeekReset_UnparseableValueReturnsFalse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[
+			{"metric":{"user_email":"a@example.com"},"value":[1700000000,"not-a-number"]}
+		]}}`))
+	}))
+	defer srv.Close()
+
+	if _, ok := lastWeekReset(srv.URL, "a@example.com"); ok {
+		t.Error("lastWeekReset() ok = true, want false on unparseable value")
+	}
+}
+
+func TestLastWeekReset_LokiErrorReturnsFalse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	if _, ok := lastWeekReset(srv.URL, "a@example.com"); ok {
+		t.Error("lastWeekReset() ok = true, want false on Loki error")
+	}
+}
+
 func loadTestTemplate(t *testing.T) map[string]interface{} {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("testdata", "template.json"))
@@ -249,6 +304,19 @@ func loadTestTemplate(t *testing.T) map[string]interface{} {
 	return template
 }
 
+// noResetDataServer answers every Loki query with an empty vector result —
+// stands in for "collector has never published week_reset_unix_ms for this
+// account yet" so tests unrelated to the reset feature don't accidentally
+// depend on lastWeekReset succeeding.
+func noResetDataServer(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[]}}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
 func TestScopeAccount_ReplacesAllPlaceholders(t *testing.T) {
 	template := loadTestTemplate(t)
 	cutlines := AllCutlines{
@@ -256,7 +324,7 @@ func TestScopeAccount_ReplacesAllPlaceholders(t *testing.T) {
 		Input:  Cutlines{P75: 10, Outlier: 20, Extreme: 30},
 		Output: Cutlines{P75: 5, Outlier: 15, Extreme: 25},
 	}
-	dashboard, err := scopeAccount(template, "a@example.com", cutlines, []string{"github"},
+	dashboard, err := scopeAccount(template, noResetDataServer(t), "a@example.com", cutlines, []string{"github"},
 		[]Option{{Text: "superpowers", Value: "superpowers"}}, "claude-code-exporter-1", "20m")
 	if err != nil {
 		t.Fatal(err)
@@ -289,12 +357,119 @@ func TestScopeAccount_ReplacesAllPlaceholders(t *testing.T) {
 	}
 }
 
+func TestScopeAccount_InjectsSinceLastResetFirstAndReplacesInPlace(t *testing.T) {
+	template := loadTestTemplate(t)
+	template["timepicker"] = map[string]interface{}{
+		"quick_ranges": []interface{}{
+			map[string]interface{}{"display": "Current week (from Mon 9am)", "from": "now/w+9h+24h", "to": "now"},
+			map[string]interface{}{"display": "Last 7 days", "from": "now-7d", "to": "now"},
+		},
+	}
+	cutlines := AllCutlines{Total: Cutlines{P75: 1, Outlier: 2, Extreme: 3}}
+
+	nextResetMs := int64(1_800_000_000_000)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"status":"success","data":{"resultType":"vector","result":[
+			{"metric":{"user_email":"a@example.com"},"value":[1700000000,"%d"]}
+		]}}`, nextResetMs)
+	}))
+	defer srv.Close()
+
+	dashboard, err := scopeAccount(template, srv.URL, "a@example.com", cutlines, nil, nil, "s", "20m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	quickRanges := dashboard["timepicker"].(map[string]interface{})["quick_ranges"].([]interface{})
+	if len(quickRanges) != 3 {
+		t.Fatalf("got %d quick_ranges, want 3 (2 template + 1 injected)", len(quickRanges))
+	}
+	first := quickRanges[0].(map[string]interface{})
+	if first["display"] != weekResetQuickRangeDisplay {
+		t.Errorf("quick_ranges[0] = %v, want it to be the Since-last-reset entry", first)
+	}
+	want := time.UnixMilli(nextResetMs).UTC().Add(-7 * 24 * time.Hour).Format("2006-01-02T15:04:05.000Z")
+	if first["from"] != want {
+		t.Errorf("quick_ranges[0].from = %v, want %v (next reset minus 7 days)", first["from"], want)
+	}
+	if first["to"] != "now" {
+		t.Errorf("quick_ranges[0].to = %v, want \"now\"", first["to"])
+	}
+}
+
+func TestScopeAccount_NoResetDataLeavesQuickRangesUnmodified(t *testing.T) {
+	template := loadTestTemplate(t)
+	template["timepicker"] = map[string]interface{}{
+		"quick_ranges": []interface{}{
+			map[string]interface{}{"display": "Current week (from Mon 9am)", "from": "now/w+9h+24h", "to": "now"},
+		},
+	}
+	cutlines := AllCutlines{Total: Cutlines{P75: 1, Outlier: 2, Extreme: 3}}
+
+	dashboard, err := scopeAccount(template, noResetDataServer(t), "a@example.com", cutlines, nil, nil, "s", "20m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	quickRanges := dashboard["timepicker"].(map[string]interface{})["quick_ranges"].([]interface{})
+	if len(quickRanges) != 1 {
+		t.Fatalf("got %d quick_ranges, want 1 (template's own, unmodified)", len(quickRanges))
+	}
+	if quickRanges[0].(map[string]interface{})["display"] == weekResetQuickRangeDisplay {
+		t.Error("injected Since-last-reset entry despite no reset data for this account")
+	}
+}
+
+func TestScopeAccount_RepeatedCallsDoNotDuplicateResetEntry(t *testing.T) {
+	template := loadTestTemplate(t)
+	template["timepicker"] = map[string]interface{}{
+		"quick_ranges": []interface{}{
+			map[string]interface{}{"display": "Last 7 days", "from": "now-7d", "to": "now"},
+		},
+	}
+	cutlines := AllCutlines{Total: Cutlines{P75: 1, Outlier: 2, Extreme: 3}}
+
+	callCount := 0
+	values := []int64{1_800_000_000_000, 1_800_600_000_000}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"status":"success","data":{"resultType":"vector","result":[
+			{"metric":{"user_email":"a@example.com"},"value":[1700000000,"%d"]}
+		]}}`, values[callCount%len(values)])
+		callCount++
+	}))
+	defer srv.Close()
+
+	var last map[string]interface{}
+	for i := 0; i < 2; i++ {
+		dashboard, err := scopeAccount(template, srv.URL, "a@example.com", cutlines, nil, nil, "s", "20m")
+		if err != nil {
+			t.Fatal(err)
+		}
+		last = dashboard
+	}
+	quickRanges := last["timepicker"].(map[string]interface{})["quick_ranges"].([]interface{})
+	count := 0
+	for _, qr := range quickRanges {
+		if qr.(map[string]interface{})["display"] == weekResetQuickRangeDisplay {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("got %d Since-last-reset entries after 2 scopeAccount calls, want exactly 1 (updated, not duplicated)", count)
+	}
+	if len(quickRanges) != 2 {
+		t.Errorf("got %d quick_ranges, want 2 (1 template entry + 1 injected)", len(quickRanges))
+	}
+	want := time.UnixMilli(values[1]).UTC().Add(-7 * 24 * time.Hour).Format("2006-01-02T15:04:05.000Z")
+	if quickRanges[0].(map[string]interface{})["from"] != want {
+		t.Errorf("quick_ranges[0].from = %v, want the latest value %v", quickRanges[0].(map[string]interface{})["from"], want)
+	}
+}
+
 func TestScopeAccount_OriginalTemplateUntouched(t *testing.T) {
 	template := loadTestTemplate(t)
 	original, _ := json.Marshal(template)
 
 	cutlines := AllCutlines{Total: Cutlines{P75: 1, Outlier: 2, Extreme: 3}}
-	_, err := scopeAccount(template, "a@example.com", cutlines, nil, nil, "s", "20m")
+	_, err := scopeAccount(template, noResetDataServer(t), "a@example.com", cutlines, nil, nil, "s", "20m")
 	if err != nil {
 		t.Fatal(err)
 	}

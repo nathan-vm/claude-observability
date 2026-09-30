@@ -169,6 +169,74 @@ func AccountEmail(configDir string) (string, error) {
 var sessionRe = regexp.MustCompile(`(?i)Current session:\s*(\d+)%\s*used(?:\s*·\s*(.+))?`)
 var weekRe = regexp.MustCompile(`(?i)Current week[^:]*:\s*(\d+)%\s*used(?:\s*·\s*(.+))?`)
 
+// weekResetRe matches the "<Mon> <D> at <H>[:MM](am|pm) (<IANA tz>)" shape
+// found anywhere inside Usage.WeekReset's free text (e.g. "resets Sep 24 at
+// 7:59pm (America/Sao_Paulo)" or "resets Oct 3 at 2pm (America/Sao_Paulo)")
+// — minutes are optional, as seen in live data.
+var weekResetRe = regexp.MustCompile(`(?i)([A-Za-z]{3,9})\s+(\d{1,2})\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([^)]+)\)`)
+
+func titleCaseMonth(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + strings.ToLower(s[1:])
+}
+
+// parseWeekReset parses Usage.WeekReset's free-text reset clause into an
+// absolute UTC instant. The year isn't in the text, so it's inferred as
+// now.Year(), rolling forward to now.Year()+1 when the parsed date would
+// otherwise land more than ~2 days in now's past — the December->January
+// boundary, where "resets Jan 2" parsed in late December must mean next
+// year. Returns ok=false on any parse failure or unrecognized IANA zone;
+// callers must not publish a zero/garbage value in that case.
+func parseWeekReset(text string, now time.Time) (time.Time, bool) {
+	m := weekResetRe.FindStringSubmatch(text)
+	if m == nil {
+		return time.Time{}, false
+	}
+	monthStr, dayStr, hourStr, minStr, ampm, tzName := m[1], m[2], m[3], m[4], m[5], m[6]
+
+	loc, err := time.LoadLocation(tzName)
+	if err != nil {
+		return time.Time{}, false
+	}
+	monthTime, err := time.Parse("Jan", titleCaseMonth(monthStr))
+	if err != nil {
+		return time.Time{}, false
+	}
+	day, err := strconv.Atoi(dayStr)
+	if err != nil {
+		return time.Time{}, false
+	}
+	hour, err := strconv.Atoi(hourStr)
+	if err != nil {
+		return time.Time{}, false
+	}
+	minute := 0
+	if minStr != "" {
+		minute, err = strconv.Atoi(minStr)
+		if err != nil {
+			return time.Time{}, false
+		}
+	}
+	switch strings.ToLower(ampm) {
+	case "pm":
+		if hour != 12 {
+			hour += 12
+		}
+	case "am":
+		if hour == 12 {
+			hour = 0
+		}
+	}
+
+	candidate := time.Date(now.Year(), monthTime.Month(), day, hour, minute, 0, 0, loc)
+	if candidate.Before(now.Add(-48 * time.Hour)) {
+		candidate = time.Date(now.Year()+1, monthTime.Month(), day, hour, minute, 0, 0, loc)
+	}
+	return candidate.UTC(), true
+}
+
 func parseUsage(text string) (Usage, error) {
 	session := sessionRe.FindStringSubmatch(text)
 	week := weekRe.FindStringSubmatch(text)
@@ -219,7 +287,8 @@ func FetchUsage(configDir string) (Usage, error) {
 }
 
 func publish(lokiURL, email string, usage Usage) error {
-	nowMs := time.Now().UnixMilli()
+	now := time.Now()
+	nowMs := now.UnixMilli()
 	// The reset-text wording is free-form and drifts wall-clock to
 	// wall-clock (e.g. "resets Sep 26 at 1:59pm" vs "resets Sep 26 at
 	// 2pm" for the same underlying window), so it goes in the line body,
@@ -229,23 +298,33 @@ func publish(lokiURL, email string, usage Usage) error {
 		SessionResetText string `json:"session_reset_text"`
 		WeekResetText    string `json:"week_reset_text"`
 	}{SessionResetText: usage.SessionReset, WeekResetText: usage.WeekReset})
+
+	// Loki structured metadata is promoted to result-series labels by
+	// `unwrap` at query time, so only the numeric fields the dashboards
+	// actually unwrap belong here — a free-text field (like the
+	// reset-text wording) fans one logical series into one result series
+	// per distinct wording, silently multiplying sum()/last_over_time()
+	// results across whatever wordings land in the query window.
+	// week_reset_unix_ms is safe here specifically because it's a
+	// monotonically-changing absolute timestamp derived from the text,
+	// not the text itself — no wording-fanout risk, same as
+	// session_pct/week_pct. Omitted entirely (not zero/stale) when
+	// usage.WeekReset is empty (the 0%-used case) or fails to parse;
+	// dashboardgen treats "field absent" as "no known reset yet."
+	metadata := map[string]string{
+		"session_pct": strconv.Itoa(usage.SessionPct),
+		"week_pct":    strconv.Itoa(usage.WeekPct),
+	}
+	if t, ok := parseWeekReset(usage.WeekReset, now); ok {
+		metadata["week_reset_unix_ms"] = strconv.FormatInt(t.UnixMilli(), 10)
+	}
+
 	return lokiclient.Push(lokiURL, []lokiclient.Stream{{
 		Labels: map[string]string{"service_name": "claude-code-usage-truth", "user_email": email},
 		Values: []lokiclient.StreamValue{{
 			TimestampNs: strconv.FormatInt(nowMs, 10) + "000000",
 			Line:        string(line),
-			// Loki structured metadata is promoted to result-series
-			// labels by `unwrap` at query time, so only the numeric
-			// fields the dashboards actually unwrap belong here — a
-			// free-text field (like the reset-text wording used to be)
-			// fans one logical series into one result series per
-			// distinct wording, silently multiplying sum()/
-			// last_over_time() results across whatever wordings land in
-			// the query window.
-			Metadata: map[string]string{
-				"session_pct": strconv.Itoa(usage.SessionPct),
-				"week_pct":    strconv.Itoa(usage.WeekPct),
-			},
+			Metadata:    metadata,
 		}},
 	}})
 }
