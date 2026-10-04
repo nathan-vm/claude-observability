@@ -28,7 +28,18 @@
 	basic_auth * {
 		import /etc/caddy/caddy-ingest-users.txt
 	}
-	reverse_proxy loki:3100
+	# An ingest token is valid for push and read, never for Loki's
+	# delete/flush/admin endpoints — everything off this list is a 403
+	# (after auth). The collector only needs push and query_range; the rest
+	# is the read API Grafana-style tooling uses. Caddy matches the cleaned
+	# path, so "push/../delete" does not slip through.
+	@allowed path /loki/api/v1/push /loki/api/v1/query /loki/api/v1/query_range /loki/api/v1/labels /loki/api/v1/label/* /loki/api/v1/series /loki/api/v1/index/*
+	handle @allowed {
+		reverse_proxy loki:3100
+	}
+	handle {
+		respond "forbidden" 403
+	}
 }
 
 {$GRAFANA_DOMAIN} {

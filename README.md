@@ -254,6 +254,10 @@ instead of `localhost`. Their Grafana access is separate: anyone signing
 in with an `@<your-allowed-domain>` Google account can log in — no token
 needed there.
 
+The Loki ingest domain only forwards `/loki/api/v1/` push, query,
+query_range, labels, label, series and index paths; an authenticated
+request to anything else (delete, flush, admin) gets a 403.
+
 **Revoke a person:**
 
 ```bash
