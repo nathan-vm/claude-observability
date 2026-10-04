@@ -3,6 +3,7 @@ package envwriter
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -180,5 +181,45 @@ func TestExistingVar_FalseWhenBlockExistsButVarMissing(t *testing.T) {
 	}
 	if ok {
 		t.Error("ok = true, want false when the Marker block exists but never assigned this var")
+	}
+}
+
+func TestWriteBlock_NewFileIsOwnerOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix permission bits")
+	}
+	path := filepath.Join(t.TempDir(), "rc")
+	if _, err := WriteBlock(path, Bash, []Var{{"FOO", "bar"}}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("new rc file mode = %o, want 600", got)
+	}
+}
+
+func TestWriteBlock_LeavesExistingFileMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix permission bits")
+	}
+	path := filepath.Join(t.TempDir(), "rc")
+	if err := os.WriteFile(path, []byte("existing line\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteBlock(path, Bash, []Var{{"FOO", "bar"}}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Errorf("existing rc file mode = %o, want unchanged 644", got)
 	}
 }
