@@ -246,7 +246,7 @@ docker compose -f docker-compose.yaml -f docker-compose.server.yaml up -d
 scripts/manage-tokens.sh add alice@example.com
 ```
 
-This prints a token once — hand it to them over a secure channel (it is
+This prints a token once (on a `TOKEN=` line) — hand it to them over a secure channel (it is
 never shown again). They enter it, along with their email, into the
 ingest email/token fields inside the wizard's "OTel endpoint" and "Loki
 ingest (collector)" sections when they run setup pointed at your domains

@@ -23,9 +23,9 @@ cat > "$workdir/Caddyfile" <<'EOF'
 EOF
 
 CADDY_USERS_FILE="$users_file" scripts/manage-tokens.sh add alice@example.com > "$workdir/alice.out"
-alice_token="$(tail -n 5 "$workdir/alice.out" | grep -A1 'uma única vez' | tail -n1)"
+alice_token="$(sed -n 's/^TOKEN=//p' "$workdir/alice.out")"
 CADDY_USERS_FILE="$users_file" scripts/manage-tokens.sh add bob@example.com > "$workdir/bob.out"
-bob_token="$(tail -n 5 "$workdir/bob.out" | grep -A1 'uma única vez' | tail -n1)"
+bob_token="$(sed -n 's/^TOKEN=//p' "$workdir/bob.out")"
 
 # Mount the whole workdir (not the individual files) at /etc/caddy: a
 # single-file bind mount can go stale when the host atomically replaces the
