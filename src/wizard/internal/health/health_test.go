@@ -3,6 +3,7 @@ package health
 import (
 	"net"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -32,10 +33,25 @@ func TestDial_Failure(t *testing.T) {
 	}
 }
 
-func TestDial_NoPortUnknownScheme(t *testing.T) {
-	for _, raw := range []string{"ftp://localhost", "localhost", "//localhost"} {
-		if err := Dial(raw, time.Second); err == nil {
-			t.Errorf("Dial(%q) = nil, want error for missing port", raw)
+func TestDial_ReportsRealCause(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want string
+	}{
+		{"ftp://localhost", "unsupported scheme"},
+		{"localhost", "no host"},
+		{"localhost:47100", "no host"},
+		{"//localhost", "unsupported scheme"},
+		{"https://", "no host"},
+	}
+	for _, tt := range tests {
+		err := Dial(tt.raw, time.Second)
+		if err == nil {
+			t.Errorf("Dial(%q) = nil, want error", tt.raw)
+			continue
+		}
+		if !strings.Contains(err.Error(), tt.want) {
+			t.Errorf("Dial(%q) = %v, want it to mention %q", tt.raw, err, tt.want)
 		}
 	}
 }

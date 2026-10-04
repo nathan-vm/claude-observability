@@ -3,6 +3,7 @@
 package health
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -13,14 +14,14 @@ var defaultPorts = map[string]string{"https": "443", "http": "80"}
 
 func hostPort(u *url.URL) (string, error) {
 	if u.Hostname() == "" {
-		return "", fmt.Errorf("no host")
+		return "", errors.New("no host (is the http:// or https:// scheme missing?)")
 	}
 	if u.Port() != "" {
 		return u.Host, nil
 	}
 	port, ok := defaultPorts[u.Scheme]
 	if !ok {
-		return "", fmt.Errorf("no port")
+		return "", fmt.Errorf("no port and unsupported scheme %q (use http:// or https://, or add a port)", u.Scheme)
 	}
 	return net.JoinHostPort(u.Hostname(), port), nil
 }
@@ -37,7 +38,7 @@ func Dial(rawURL string, timeout time.Duration) error {
 	}
 	addr, err := hostPort(u)
 	if err != nil {
-		return fmt.Errorf("endpoint %q has no port", rawURL)
+		return fmt.Errorf("invalid endpoint %q: %w", rawURL, err)
 	}
 	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
