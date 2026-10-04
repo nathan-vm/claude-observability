@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.0] - 2026-10-04
+
+### Added
+- feat: add per-account "Since last reset" time-picker option (#15)
+
 ## [0.1.5] - 2026-09-26
 
 ### Fixed
