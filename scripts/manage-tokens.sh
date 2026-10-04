@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Adds, rotates, or removes one person's Caddy ingest credential in
 # config/caddy-ingest-users.txt (see config/Caddyfile and
-# docs/superpowers/specs/2026-09-29-production-auth-gateway-design.md).
+# docs/specs/2026-09-29-production-auth-gateway-design.md).
 # One credential is valid on BOTH ingest routes (OTel Collector, collector
 # -> Loki) — there is only ever one line per email.
 #

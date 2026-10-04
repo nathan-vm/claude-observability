@@ -485,7 +485,7 @@ func percentEncodeHeaderValue(s string) string {
 
 // basicAuthHeaderValue builds the OTEL_EXPORTER_OTLP_HEADERS entry for HTTP
 // Basic Auth — Caddy's basic_auth directive validates this at the gateway
-// (see docs/superpowers/specs/2026-09-29-production-auth-gateway-design.md).
+// (see docs/specs/2026-09-29-production-auth-gateway-design.md).
 // Replaces the old Bearer-token entry, which nothing ever validated.
 func basicAuthHeaderValue(username, password string) string {
 	raw := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
@@ -506,7 +506,7 @@ func otelHeaderVars(ingestEmail, ingestToken string) []envwriter.Var {
 // credentials were entered (a purely local stack), or endpoint with
 // username:password embedded as URL userinfo otherwise. Go's net/http
 // client applies HTTP Basic Auth from a URL's userinfo automatically (see
-// docs/superpowers/specs/2026-09-29-production-auth-gateway-design.md), so
+// docs/specs/2026-09-29-production-auth-gateway-design.md), so
 // src/collector needs no code change — only this value changes.
 func lokiIngestURL(endpoint, username, password string) (string, error) {
 	if username == "" || password == "" {
