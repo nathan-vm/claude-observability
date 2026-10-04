@@ -3,12 +3,15 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
+	"claude-observability-wizard/internal/claudesettings"
 	"claude-observability-wizard/internal/discovery"
 	"claude-observability-wizard/internal/envwriter"
 	"claude-observability-wizard/internal/health"
@@ -53,6 +56,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	accounts = discovery.WithConfigDir(accounts, os.Getenv("CLAUDE_CONFIG_DIR"))
 	if len(accounts) == 0 {
 		fmt.Fprintln(out, "  No config directory found (~/.claude*/projects).")
 		fmt.Fprintln(out, "  Falling back to ~/.claude — re-run this after your first Claude Code session.")
@@ -74,21 +78,7 @@ func run() error {
 	}
 	fmt.Fprintln(out, "ok")
 
-	telemetryVars := []envwriter.Var{
-		{Name: "CLAUDE_CODE_ENABLE_TELEMETRY", Value: "1"},
-		{Name: "OTEL_METRICS_EXPORTER", Value: "otlp"},
-		{Name: "OTEL_LOGS_EXPORTER", Value: "otlp"},
-		{Name: "OTEL_EXPORTER_OTLP_PROTOCOL", Value: "grpc"},
-		{Name: "OTEL_EXPORTER_OTLP_ENDPOINT", Value: endpoint},
-		{Name: "OTEL_METRIC_EXPORT_INTERVAL", Value: "60000"},
-		{Name: "OTEL_LOGS_EXPORT_INTERVAL", Value: "30000"},
-	}
-	if token != "" {
-		telemetryVars = append(telemetryVars, envwriter.Var{
-			Name:  "OTEL_EXPORTER_OTLP_HEADERS",
-			Value: "Authorization=Bearer%20" + token,
-		})
-	}
+	settingsVars, telemetryVars := buildTelemetryVars(endpoint, token)
 
 	var collectorVars []envwriter.Var
 	if len(chosen) > 0 {
@@ -114,8 +104,28 @@ func run() error {
 	allVars := append(append([]envwriter.Var{}, telemetryVars...), collectorVars...)
 
 	fmt.Fprintln(out, "\n── Enabling telemetry in your shell ───────────────────────")
+	if warning := staleEndpointWarning(home, endpoint); warning != "" {
+		fmt.Fprintln(out, warning)
+	}
 	if err := writeShellConfig(out, home, allVars); err != nil {
 		return err
+	}
+
+	var updatedSettings, skippedSettings []string
+	if targets := settingsTargets(chosen); len(targets) > 0 {
+		fmt.Fprintln(out, "\n── Enabling telemetry in Claude Code settings ───────────────")
+		fmt.Fprintln(out, "  Sessions started without your shell rc (GUI launchers such as Maestro) only")
+		fmt.Fprintln(out, "  see telemetry settings from settings.json. These files will get an \"env\" entry:")
+		for _, dir := range targets {
+			fmt.Fprintf(out, "    %s\n", settingsPath(dir))
+		}
+		if wizard.AskYesNo(out, stdin, "  Also enable telemetry in these Claude Code settings files (existing values of these env keys are overwritten)?", true) {
+			updatedSettings, skippedSettings = writeClaudeSettings(out, targets, settingsVars)
+			if token != "" {
+				fmt.Fprintln(out, "  note: the auth token (OTEL_EXPORTER_OTLP_HEADERS) is not written to settings.json;")
+				fmt.Fprintln(out, "  sessions that don't read your shell rc will not authenticate against a gateway-protected endpoint.")
+			}
+		}
 	}
 
 	if len(rejected) > 0 {
@@ -143,6 +153,15 @@ func run() error {
 
 	fmt.Fprintln(out, "\n── Done ─────────────────────────────────────────────────────")
 	fmt.Fprintln(out, "  Open a new terminal (or reload your shell config) to pick up the telemetry vars.")
+	if len(updatedSettings) > 0 {
+		fmt.Fprintln(out, "  Restart any Claude Code session or launcher already running (e.g. Maestro) to pick up settings.json.")
+	}
+	if len(skippedSettings) > 0 {
+		fmt.Fprintln(out, "  Skipped settings files (fix and re-run):")
+		for _, p := range skippedSettings {
+			fmt.Fprintf(out, "    %s\n", p)
+		}
+	}
 	return nil
 }
 
@@ -175,6 +194,102 @@ func shellRCPath(home string) (path string, shell envwriter.Shell) {
 	default:
 		return filepath.Join(home, ".bashrc"), envwriter.Bash
 	}
+}
+
+// buildTelemetryVars returns the vars for settings.json (settingsVars) and
+// the superset for the rc file / Windows environment (telemetryVars).
+// OTEL_EXPORTER_OTLP_HEADERS (the auth token) is deliberately only in the
+// latter: settings.json is a plaintext file other tools may read or sync, so
+// the token is not copied into it.
+func buildTelemetryVars(endpoint, token string) (settingsVars, telemetryVars []envwriter.Var) {
+	settingsVars = []envwriter.Var{
+		{Name: "CLAUDE_CODE_ENABLE_TELEMETRY", Value: "1"},
+		{Name: "OTEL_METRICS_EXPORTER", Value: "otlp"},
+		{Name: "OTEL_LOGS_EXPORTER", Value: "otlp"},
+		{Name: "OTEL_EXPORTER_OTLP_PROTOCOL", Value: "grpc"},
+		{Name: "OTEL_EXPORTER_OTLP_ENDPOINT", Value: endpoint},
+		{Name: "OTEL_METRIC_EXPORT_INTERVAL", Value: "60000"},
+		{Name: "OTEL_LOGS_EXPORT_INTERVAL", Value: "30000"},
+	}
+	telemetryVars = append([]envwriter.Var{}, settingsVars...)
+	if token != "" {
+		telemetryVars = append(telemetryVars, envwriter.Var{
+			Name:  "OTEL_EXPORTER_OTLP_HEADERS",
+			Value: "Authorization=Bearer%20" + token,
+		})
+	}
+	return settingsVars, telemetryVars
+}
+
+func settingsPath(dir string) string {
+	return filepath.Join(dir, "settings.json")
+}
+
+// settingsTargets returns the config dirs of the accounts the user chose, in
+// order and without duplicates. Rejected accounts never appear here.
+func settingsTargets(chosen []discovery.Account) []string {
+	seen := make(map[string]bool, len(chosen))
+	var dirs []string
+	for _, a := range chosen {
+		dir := filepath.Clean(a.Dir)
+		if seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		dirs = append(dirs, dir)
+	}
+	return dirs
+}
+
+// writeClaudeSettings merges vars into <dir>/settings.json for each dir and
+// reports every existing value it overwrites. A failure on one dir is
+// reported and skipped, never fatal. It returns the settings.json paths that
+// were rewritten and those that were skipped.
+func writeClaudeSettings(out io.Writer, dirs []string, vars []envwriter.Var) (updated, skipped []string) {
+	for _, dir := range dirs {
+		path := settingsPath(dir)
+		changed, overwritten, err := claudesettings.MergeEnv(path, vars)
+		switch {
+		case err != nil:
+			fmt.Fprintf(out, "  skipped %s: %v (file left untouched - fix it and re-run)\n", path, err)
+			skipped = append(skipped, path)
+		case changed:
+			fmt.Fprintf(out, "  updated %s\n", path)
+			for _, o := range overwritten {
+				fmt.Fprintf(out, "    overwrote %s: %s -> %s\n", o.Name, displayForLog(o.Name, o.Old), displayForLog(o.Name, o.New))
+			}
+			updated = append(updated, path)
+		default:
+			fmt.Fprintf(out, "  already up to date: %s\n", path)
+		}
+	}
+	return updated, skipped
+}
+
+func displayForLog(name, value string) string {
+	upper := strings.ToUpper(name)
+	for _, marker := range []string{"TOKEN", "SECRET", "PASSWORD", "KEY", "AUTH", "HEADERS"} {
+		if strings.Contains(upper, marker) {
+			return "<redacted>"
+		}
+	}
+	return value
+}
+
+// staleEndpointWarning returns a warning when the existing rc block already
+// pins a different OTEL_EXPORTER_OTLP_ENDPOINT than the one just chosen (the
+// rc block is write-once, so it won't be rewritten), or "" otherwise. Always
+// "" on Windows, where setx overwrites.
+func staleEndpointWarning(home, endpoint string) string {
+	if runtime.GOOS == "windows" {
+		return ""
+	}
+	path, shell := shellRCPath(home)
+	existing, ok, err := envwriter.ExistingVar(path, shell, "OTEL_EXPORTER_OTLP_ENDPOINT")
+	if err != nil || !ok || existing == endpoint {
+		return ""
+	}
+	return fmt.Sprintf("  warning: %s still has OTEL_EXPORTER_OTLP_ENDPOINT=%s, not the endpoint you entered (%s);\n  the rc block is not rewritten on re-run - edit it by hand.", path, existing, endpoint)
 }
 
 func writeShellConfig(out *os.File, home string, vars []envwriter.Var) error {

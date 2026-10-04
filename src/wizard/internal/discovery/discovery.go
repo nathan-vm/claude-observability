@@ -78,3 +78,34 @@ func readEmail(dir string) string {
 	}
 	return cfg.OauthAccount.EmailAddress
 }
+
+// WithConfigDir appends dir (typically $CLAUDE_CONFIG_DIR) to accounts when it
+// is non-empty, exists, contains a "projects" subdirectory, and isn't already
+// listed. Paths are compared after cleaning and resolving symlinks.
+func WithConfigDir(accounts []Account, dir string) []Account {
+	if dir == "" {
+		return accounts
+	}
+	dir, err := filepath.Abs(dir)
+	if err != nil {
+		return accounts
+	}
+	if info, err := os.Stat(filepath.Join(dir, "projects")); err != nil || !info.IsDir() {
+		return accounts
+	}
+	resolved := resolvePath(dir)
+	for _, a := range accounts {
+		if resolvePath(a.Dir) == resolved {
+			return accounts
+		}
+	}
+	return append(accounts, Account{Dir: dir, Email: readEmail(dir)})
+}
+
+func resolvePath(p string) string {
+	p = filepath.Clean(p)
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	return p
+}
