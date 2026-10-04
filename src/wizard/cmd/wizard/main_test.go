@@ -430,3 +430,22 @@ func TestLokiIngestURL_EmbedsCredentials(t *testing.T) {
 		t.Errorf("got %q, want scheme/host preserved", got)
 	}
 }
+
+func TestLokiIngestURL_RejectsBadEndpoints(t *testing.T) {
+	for _, endpoint := range []string{"localhost:47100", "host", "loki.example.com", "ftp://loki.example.com", "http://", "https:///path", ""} {
+		for _, creds := range [][2]string{{"", ""}, {"alice@example.com", "tok"}} {
+			got, err := lokiIngestURL(endpoint, creds[0], creds[1])
+			if err == nil {
+				t.Errorf("lokiIngestURL(%q, %q, %q) = %q, want error", endpoint, creds[0], creds[1], got)
+			}
+		}
+	}
+}
+
+func TestLokiIngestURL_AcceptsHTTPAndHTTPS(t *testing.T) {
+	for _, endpoint := range []string{"http://localhost:47100", "https://loki-ingest.example.com", "https://loki-ingest.example.com:8443/"} {
+		if _, err := lokiIngestURL(endpoint, "", ""); err != nil {
+			t.Errorf("lokiIngestURL(%q) error: %v", endpoint, err)
+		}
+	}
+}

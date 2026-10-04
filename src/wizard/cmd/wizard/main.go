@@ -115,6 +115,16 @@ func run() error {
 		if err != nil {
 			return err
 		}
+
+		fmt.Fprintf(out, "  checking %s ... ", lokiEndpoint)
+		if err := health.Dial(lokiEndpoint, 3*time.Second); err != nil {
+			fmt.Fprintln(out, "unreachable")
+			if lokiEndpoint == "http://localhost:47100" {
+				return fmt.Errorf("can't reach %s — nothing is listening there.\n  Run `docker compose up -d` first, then re-run this wizard", lokiEndpoint)
+			}
+			return fmt.Errorf("can't reach %s — nothing is listening there.\n  Check the URL and that it's reachable from this machine", lokiEndpoint)
+		}
+		fmt.Fprintln(out, "ok")
 		collectorVars = append(collectorVars, envwriter.Var{Name: "LOKI_URL", Value: lokiURLValue})
 	}
 
@@ -504,17 +514,22 @@ func otelHeaderVars(ingestEmail, ingestToken string) []envwriter.Var {
 
 // lokiIngestURL builds the collector's LOKI_URL: endpoint unchanged when no
 // credentials were entered (a purely local stack), or endpoint with
-// username:password embedded as URL userinfo otherwise. Go's net/http
+// username:password embedded as URL userinfo otherwise. The endpoint must be
+// an http(s) URL with a host either way — a scheme-less "localhost:47100"
+// would otherwise parse into something the credentials silently never reach. Go's net/http
 // client applies HTTP Basic Auth from a URL's userinfo automatically (see
 // docs/specs/2026-09-29-production-auth-gateway-design.md). The collector
 // redacts the password whenever it logs or reports this URL.
 func lokiIngestURL(endpoint, username, password string) (string, error) {
-	if username == "" || password == "" {
-		return endpoint, nil
-	}
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return "", fmt.Errorf("invalid Loki endpoint %q: %w", endpoint, err)
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		return "", fmt.Errorf("invalid Loki endpoint %q: must be an http:// or https:// URL with a host (e.g. http://localhost:47100)", endpoint)
+	}
+	if username == "" || password == "" {
+		return endpoint, nil
 	}
 	u.User = url.UserPassword(username, password)
 	return u.String(), nil
