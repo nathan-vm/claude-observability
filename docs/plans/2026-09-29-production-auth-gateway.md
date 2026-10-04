@@ -41,7 +41,7 @@
 **Interfaces:**
 - Produces: `percentEncodeHeaderValue(s string) string`, `basicAuthHeaderValue(username, password string) string` — both used by Task 2.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `src/wizard/cmd/wizard/main_test.go` (add `"encoding/base64"` and `"net/url"` to its import block alongside the existing `"path/filepath"`, `"regexp"`, `"runtime"`, `"testing"`, and `"claude-observability-wizard/internal/envwriter"`):
 
@@ -79,12 +79,12 @@ func TestBasicAuthHeaderValue_RoundTrips(t *testing.T) {
 
 `strings` is not yet imported by `main_test.go` either — add it to the same import block.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd src/wizard && go test ./cmd/wizard/... -run 'TestPercentEncodeHeaderValue|TestBasicAuthHeaderValue_RoundTrips' -v`
 Expected: FAIL — `percentEncodeHeaderValue` / `basicAuthHeaderValue` undefined.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Add to `src/wizard/cmd/wizard/main.go`. Add `"encoding/base64"` and `"strings"` to its import block (it does not yet import either).
 
@@ -121,17 +121,17 @@ func basicAuthHeaderValue(username, password string) string {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd src/wizard && go test ./cmd/wizard/... -run 'TestPercentEncodeHeaderValue|TestBasicAuthHeaderValue_RoundTrips' -v`
 Expected: PASS
 
-- [ ] **Step 5: Run the full wizard module build/vet/test**
+- [x] **Step 5: Run the full wizard module build/vet/test**
 
 Run: `cd src/wizard && go build ./... && go vet ./... && go test ./...`
 Expected: all pass (no other package references these new functions yet).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/wizard/cmd/wizard/main.go src/wizard/cmd/wizard/main_test.go
@@ -150,7 +150,7 @@ git commit -m "feat(wizard): add OTLP header percent-encoding and Basic Auth hel
 - Consumes: `basicAuthHeaderValue(username, password string) string` from Task 1.
 - Produces: `otelHeaderVars(ingestEmail, ingestToken string) []envwriter.Var` — pattern later tasks and any future caller can reuse; `defaultEmail` local variable in `run()`, reused by Task 3.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `src/wizard/cmd/wizard/main_test.go`:
 
@@ -176,12 +176,12 @@ func TestOtelHeaderVars_BuildsBasicAuthWhenBothSet(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd src/wizard && go test ./cmd/wizard/... -run TestOtelHeaderVars -v`
 Expected: FAIL — `otelHeaderVars` undefined.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Add this function to `src/wizard/cmd/wizard/main.go`, near `basicAuthHeaderValue`:
 
@@ -239,17 +239,17 @@ Replace with:
 	telemetryVars = append(telemetryVars, otelHeaderVars(ingestEmail, ingestToken)...)
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd src/wizard && go test ./cmd/wizard/... -run TestOtelHeaderVars -v`
 Expected: PASS
 
-- [ ] **Step 5: Run the full wizard module build/vet/test**
+- [x] **Step 5: Run the full wizard module build/vet/test**
 
 Run: `cd src/wizard && go build ./... && go vet ./... && go test ./...`
 Expected: all pass — confirms `run()` still compiles with the renamed variables and the deleted `token` variable has no other references.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/wizard/cmd/wizard/main.go src/wizard/cmd/wizard/main_test.go
@@ -268,7 +268,7 @@ git commit -m "feat(wizard): switch OTel ingest prompt to Basic Auth (email + to
 - Consumes: `defaultEmail` local variable from Task 2.
 - Produces: `lokiIngestURL(endpoint, username, password string) (string, error)`; the collector's `collectorVars` gains a new `LOKI_URL` entry, consumed by `src/collector/cmd/collector/main.go`'s existing `envOr("LOKI_URL", "http://localhost:47100")` (no change needed there — see Global Constraints).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `src/wizard/cmd/wizard/main_test.go` (the `url` and `net/url`-derived helpers below reuse the `"net/url"` import added in Task 1):
 
@@ -305,12 +305,12 @@ func TestLokiIngestURL_EmbedsCredentials(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd src/wizard && go test ./cmd/wizard/... -run TestLokiIngestURL -v`
 Expected: FAIL — `lokiIngestURL` undefined.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Add `"net/url"` to `main.go`'s import block (not yet imported there). Add this function near `otelHeaderVars`:
 
@@ -370,17 +370,17 @@ Add, right before the block's closing `}` (after the `EXPORTER_STREAM` append, s
 		collectorVars = append(collectorVars, envwriter.Var{Name: "LOKI_URL", Value: lokiURLValue})
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd src/wizard && go test ./cmd/wizard/... -run TestLokiIngestURL -v`
 Expected: PASS
 
-- [ ] **Step 5: Run the full wizard module build/vet/test**
+- [x] **Step 5: Run the full wizard module build/vet/test**
 
 Run: `cd src/wizard && go build ./... && go vet ./... && go test ./...`
 Expected: all pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/wizard/cmd/wizard/main.go src/wizard/cmd/wizard/main_test.go
@@ -399,7 +399,7 @@ git commit -m "feat(wizard): prompt for Loki ingest credentials, embed in LOKI_U
 **Interfaces:**
 - Produces: three site blocks (`{$OTEL_DOMAIN}`, `{$LOKI_INGEST_DOMAIN}`, `{$GRAFANA_DOMAIN}`) and the credentials-file import path `/etc/caddy/caddy-ingest-users.txt`, both consumed by Task 5's `docker-compose.server.yaml` and Task 6's `scripts/manage-tokens.sh`.
 
-- [ ] **Step 1: Create `config/Caddyfile`**
+- [x] **Step 1: Create `config/Caddyfile`**
 
 ```caddyfile
 # Production auth gateway — the only service a real-server deployment
@@ -442,7 +442,7 @@ git commit -m "feat(wizard): prompt for Loki ingest credentials, embed in LOKI_U
 }
 ```
 
-- [ ] **Step 2: Create `config/caddy-ingest-users.txt.example`**
+- [x] **Step 2: Create `config/caddy-ingest-users.txt.example`**
 
 ```
 # One line per person: <email> <bcrypt-hash>, generated and managed by
@@ -457,7 +457,7 @@ git commit -m "feat(wizard): prompt for Loki ingest credentials, embed in LOKI_U
 #   docker compose -f docker-compose.yaml -f docker-compose.server.yaml exec caddy caddy reload --config /etc/caddy/Caddyfile
 ```
 
-- [ ] **Step 3: Add the real credentials file to `.gitignore`**
+- [x] **Step 3: Add the real credentials file to `.gitignore`**
 
 Add, in the section listing other "modelo versionado ao lado" entries:
 
@@ -467,7 +467,7 @@ Add, in the section listing other "modelo versionado ao lado" entries:
 config/caddy-ingest-users.txt
 ```
 
-- [ ] **Step 4: Validate the Caddyfile parses and enforces auth (positive case)**
+- [x] **Step 4: Validate the Caddyfile parses and enforces auth (positive case)**
 
 ```bash
 cp config/caddy-ingest-users.txt.example config/caddy-ingest-users.txt
@@ -482,7 +482,7 @@ docker run --rm \
 
 Expected: exits 0, prints "Valid configuration".
 
-- [ ] **Step 5: Confirm a missing credentials file fails loudly, not silently**
+- [x] **Step 5: Confirm a missing credentials file fails loudly, not silently**
 
 ```bash
 docker run --rm \
@@ -495,7 +495,7 @@ docker run --rm \
 
 Expected: **non-zero exit**, an error mentioning the missing `caddy-ingest-users.txt` (Docker turns the un-mounted bind source into an empty directory, which `import` cannot read as a file). This is the behavior Review Focus's fifth item requires — a missing credentials file must never come up as "no auth" instead of "won't start."
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add config/Caddyfile config/caddy-ingest-users.txt.example .gitignore
@@ -515,7 +515,7 @@ git commit -m "feat: add Caddy gateway config for production auth"
 - Consumes: `config/Caddyfile`, `config/caddy-ingest-users.txt` (Task 4).
 - Produces: the `caddy` service and env-var names (`OTEL_DOMAIN`, `LOKI_INGEST_DOMAIN`, `GRAFANA_DOMAIN`, `GRAFANA_GOOGLE_CLIENT_ID`, `GRAFANA_GOOGLE_CLIENT_SECRET`, `GRAFANA_GOOGLE_ALLOWED_DOMAINS`, `GRAFANA_ADMIN_PASSWORD`) Task 8's docs reference.
 
-- [ ] **Step 1: Create `docker-compose.server.yaml`**
+- [x] **Step 1: Create `docker-compose.server.yaml`**
 
 ```yaml
 # Overlay for a real server deployment: adds Caddy as the only publicly
@@ -566,7 +566,7 @@ volumes:
 
 `environment` merges key-by-key across `-f` files regardless of array vs. mapping syntax (Compose normalizes both to a map before merging) — so this overlay only touches the four `GF_*` keys it lists; `docker-compose.yaml`'s `GF_SECURITY_ADMIN_USER`, `GF_USERS_DEFAULT_THEME`, and the alerting/analytics-disable flags survive untouched. Step 4 below proves this concretely rather than trusting it by assumption.
 
-- [ ] **Step 2: Create `.env.example`**
+- [x] **Step 2: Create `.env.example`**
 
 ```
 # Copy to .env and fill in before `docker compose -f docker-compose.yaml -f docker-compose.server.yaml up -d`.
@@ -590,7 +590,7 @@ GRAFANA_GOOGLE_ALLOWED_DOMAINS=example.com
 GRAFANA_ADMIN_PASSWORD=REPLACE_ME
 ```
 
-- [ ] **Step 3: Add `.env` to `.gitignore`**
+- [x] **Step 3: Add `.env` to `.gitignore`**
 
 Add, next to the `config/caddy-ingest-users.txt` entry from Task 4:
 
@@ -600,7 +600,7 @@ Add, next to the `config/caddy-ingest-users.txt` entry from Task 4:
 .env
 ```
 
-- [ ] **Step 4: Validate the overlay merges correctly**
+- [x] **Step 4: Validate the overlay merges correctly**
 
 ```bash
 docker compose -f docker-compose.yaml -f docker-compose.server.yaml --env-file .env.example config > /tmp/merged-server-config.yaml
@@ -611,7 +611,7 @@ grep -q "GF_SECURITY_ADMIN_USER=\"admin\"" /tmp/merged-server-config.yaml && ech
 
 Expected: all three lines print "OK" — proving the merge is key-by-key, not a wholesale replacement of Grafana's environment.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add docker-compose.server.yaml .env.example .gitignore
@@ -629,7 +629,7 @@ git commit -m "feat: add docker-compose.server.yaml overlay for the auth gateway
 - Consumes: `config/caddy-ingest-users.txt` format (Task 4); `caddy:2`'s `caddy hash-password` subcommand via `docker run`.
 - Produces: the `add`/`remove` CLI other tasks (7) and the README (Task 8) reference; `CADDY_USERS_FILE` env var override, used by Task 7's smoke test to point at a throwaway file.
 
-- [ ] **Step 1: Create `scripts/manage-tokens.sh`**
+- [x] **Step 1: Create `scripts/manage-tokens.sh`**
 
 ```bash
 #!/usr/bin/env bash
@@ -694,13 +694,13 @@ case "$action" in
 esac
 ```
 
-- [ ] **Step 2: Make it executable**
+- [x] **Step 2: Make it executable**
 
 ```bash
 chmod +x scripts/manage-tokens.sh
 ```
 
-- [ ] **Step 3: Test — add creates a well-formed bcrypt line**
+- [x] **Step 3: Test — add creates a well-formed bcrypt line**
 
 ```bash
 tmp_users="$(mktemp)"
@@ -711,7 +711,7 @@ grep -E '^alice@example\.com \$2[aby]\$' "$tmp_users" && echo "add: OK"
 
 Expected: the script prints a token once, and the grep finds one line for `alice@example.com` whose second field starts with a bcrypt hash prefix (`$2a$`, `$2b$`, or `$2y$`) — printing "add: OK".
 
-- [ ] **Step 4: Test — re-adding the same email replaces, not duplicates, the line (Review Focus item 3)**
+- [x] **Step 4: Test — re-adding the same email replaces, not duplicates, the line (Review Focus item 3)**
 
 ```bash
 CADDY_USERS_FILE="$tmp_users" scripts/manage-tokens.sh add alice@example.com
@@ -721,7 +721,7 @@ count="$(grep -c '^alice@example\.com ' "$tmp_users")"
 
 Expected: prints "rotation replaces in place: OK" — exactly one line for `alice@example.com`, not two.
 
-- [ ] **Step 5: Test — remove deletes the line**
+- [x] **Step 5: Test — remove deletes the line**
 
 ```bash
 CADDY_USERS_FILE="$tmp_users" scripts/manage-tokens.sh remove alice@example.com
@@ -731,7 +731,7 @@ rm -f "$tmp_users"
 
 Expected: prints "remove: OK" — the line is gone.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add scripts/manage-tokens.sh
@@ -748,7 +748,7 @@ git commit -m "feat: add scripts/manage-tokens.sh for gateway credential admin"
 **Interfaces:**
 - Consumes: `scripts/manage-tokens.sh` (Task 6, via `CADDY_USERS_FILE`), the `basic_auth`/`import` mechanism from `config/Caddyfile` (Task 4, reproduced standalone here on throwaway ports so this test needs neither real DNS/TLS nor the rest of the stack running).
 
-- [ ] **Step 1: Create `scripts/smoketest-gateway-auth.sh`**
+- [x] **Step 1: Create `scripts/smoketest-gateway-auth.sh`**
 
 ```bash
 #!/usr/bin/env bash
@@ -809,7 +809,7 @@ got="$(code -u "bob@example.com:$bob_token" http://localhost:18080/)"
 echo "all gateway auth checks passed"
 ```
 
-- [ ] **Step 2: Make it executable and run it**
+- [x] **Step 2: Make it executable and run it**
 
 ```bash
 chmod +x scripts/smoketest-gateway-auth.sh
@@ -820,7 +820,7 @@ Expected: prints six "OK" lines ending in "all gateway auth checks passed", exit
 
 If the `alice_token`/`bob_token` extraction (`grep -A1 'uma única vez'`) doesn't match `scripts/manage-tokens.sh`'s actual output shape from Task 6, adjust the extraction to match — the token is the line printed immediately after the "mostrado uma única vez" message.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add scripts/smoketest-gateway-auth.sh
@@ -837,7 +837,7 @@ git commit -m "test: add end-to-end smoke test for gateway auth and revocation"
 **Interfaces:**
 - Consumes: `docker-compose.server.yaml`, `.env.example` (Task 5), `scripts/manage-tokens.sh` (Task 6), the wizard's new prompts (Tasks 2–3).
 
-- [ ] **Step 1: Add a "Production deployment" section to `README.md`**
+- [x] **Step 1: Add a "Production deployment" section to `README.md`**
 
 Insert a new `## Production deployment` section immediately after the existing `## Managing the stack` section (before `## Troubleshooting`):
 
@@ -893,12 +893,12 @@ domain-restricted Google account is revoked by removing them from your
 Google Workspace, not from anything here.
 ```
 
-- [ ] **Step 2: Verify the section renders sensibly**
+- [x] **Step 2: Verify the section renders sensibly**
 
 Run: `grep -n "^## Production deployment" README.md`
 Expected: one match, positioned between `## Managing the stack` and `## Troubleshooting` (confirm with `grep -n "^## "  README.md`).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add README.md
