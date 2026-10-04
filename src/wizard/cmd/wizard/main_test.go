@@ -1,11 +1,16 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strings"
 	"testing"
 
+	"claude-observability-wizard/internal/discovery"
 	"claude-observability-wizard/internal/envwriter"
 )
 
@@ -173,5 +178,172 @@ func TestResolveExporterStream_MintsFreshWindows(t *testing.T) {
 	}
 	if !streamValuePattern.MatchString(got) {
 		t.Errorf("got %q, want a freshly-minted value", got)
+	}
+}
+
+func TestSettingsTargets_FromChosenOnlyDedupedInOrder(t *testing.T) {
+	chosen := []discovery.Account{{Dir: "/a/.claude"}, {Dir: "/a/.claude-work/"}, {Dir: "/a/.claude"}}
+	got := settingsTargets(chosen)
+	want := []string{"/a/.claude", "/a/.claude-work"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != filepath.FromSlash(want[i]) {
+			t.Errorf("got[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	if settingsTargets(nil) != nil {
+		t.Error("nil chosen should yield no targets")
+	}
+}
+
+func TestWriteClaudeSettings_SkipsBadFileAndContinues(t *testing.T) {
+	root := t.TempDir()
+	good := filepath.Join(root, "good")
+	bad := filepath.Join(root, "bad")
+	for _, d := range []string{good, bad} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	badContent := "{not json"
+	if err := os.WriteFile(filepath.Join(bad, "settings.json"), []byte(badContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	settingsVars, _ := buildTelemetryVars("http://localhost:47317", "")
+	var out bytes.Buffer
+	updated, skipped := writeClaudeSettings(&out, []string{bad, good}, settingsVars)
+
+	if len(updated) != 1 || updated[0] != filepath.Join(good, "settings.json") {
+		t.Errorf("updated = %v", updated)
+	}
+	if len(skipped) != 1 || skipped[0] != filepath.Join(bad, "settings.json") {
+		t.Errorf("skipped = %v", skipped)
+	}
+	got, _ := os.ReadFile(filepath.Join(bad, "settings.json"))
+	if string(got) != badContent {
+		t.Error("bad file was modified")
+	}
+	if _, err := os.Stat(filepath.Join(good, "settings.json")); err != nil {
+		t.Errorf("good file not written: %v", err)
+	}
+	if !strings.Contains(out.String(), "skipped") {
+		t.Errorf("output missing skip notice: %q", out.String())
+	}
+}
+
+func TestBuildTelemetryVars_SettingsMatchesEnvAndExcludesSecretsAndCollectorVars(t *testing.T) {
+	settingsVars, telemetryVars := buildTelemetryVars("http://example:4317", "s3cret")
+
+	dir := t.TempDir()
+	var out bytes.Buffer
+	if _, skipped := writeClaudeSettings(&out, []string{dir}, settingsVars); len(skipped) != 0 {
+		t.Fatalf("skipped: %v", skipped)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Env map[string]string `json:"env"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Env) != len(settingsVars) || len(settingsVars) != 7 {
+		t.Fatalf("env = %v, want exactly the 7 settings vars", doc.Env)
+	}
+	for _, v := range settingsVars {
+		if doc.Env[v.Name] != v.Value {
+			t.Errorf("env[%s] = %q, want %q", v.Name, doc.Env[v.Name], v.Value)
+		}
+	}
+	for _, banned := range []string{"OTEL_EXPORTER_OTLP_HEADERS", "CLAUDE_DIR", "CLAUDE_OBSERVABILITY_EXTRA_DIRS", "EXPORTER_STREAM"} {
+		if _, ok := doc.Env[banned]; ok {
+			t.Errorf("%s must not be written to settings.json", banned)
+		}
+	}
+	if strings.Contains(string(data), "s3cret") {
+		t.Error("token leaked into settings.json")
+	}
+
+	last := telemetryVars[len(telemetryVars)-1]
+	if len(telemetryVars) != 8 || last.Name != "OTEL_EXPORTER_OTLP_HEADERS" || last.Value != "Authorization=Bearer%20s3cret" {
+		t.Errorf("rc vars lost the headers entry: %v", telemetryVars)
+	}
+}
+
+func TestBuildTelemetryVars_NoTokenNoHeaders(t *testing.T) {
+	_, telemetryVars := buildTelemetryVars("http://x", "")
+	if len(telemetryVars) != 7 {
+		t.Errorf("got %d vars, want 7", len(telemetryVars))
+	}
+}
+
+func TestStaleEndpointWarning(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("rc files are not used on windows")
+	}
+	t.Setenv("SHELL", "/bin/zsh")
+	home := t.TempDir()
+
+	if w := staleEndpointWarning(home, "http://new"); w != "" {
+		t.Errorf("no rc yet, got warning %q", w)
+	}
+
+	rc, shell := shellRCPath(home)
+	if _, err := envwriter.WriteBlock(rc, shell, []envwriter.Var{{Name: "OTEL_EXPORTER_OTLP_ENDPOINT", Value: "http://old"}}); err != nil {
+		t.Fatal(err)
+	}
+	if w := staleEndpointWarning(home, "http://old"); w != "" {
+		t.Errorf("same endpoint, got warning %q", w)
+	}
+	w := staleEndpointWarning(home, "http://new")
+	if !strings.Contains(w, "http://old") || !strings.Contains(w, "http://new") {
+		t.Errorf("warning = %q", w)
+	}
+	if strings.Contains(w, "settings.json") {
+		t.Errorf("warning must not make claims about settings.json: %q", w)
+	}
+}
+
+func TestWriteClaudeSettings_ReportsOverwrittenValuesAndRedactsSecrets(t *testing.T) {
+	dir := t.TempDir()
+	existing := `{"env": {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://old", "MY_API_TOKEN": "hunter2"}}`
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	vars := []envwriter.Var{
+		{Name: "OTEL_EXPORTER_OTLP_ENDPOINT", Value: "http://new"},
+		{Name: "MY_API_TOKEN", Value: "newsecret"},
+	}
+	var out bytes.Buffer
+	updated, _ := writeClaudeSettings(&out, []string{dir}, vars)
+	if len(updated) != 1 {
+		t.Fatalf("updated = %v", updated)
+	}
+	got := out.String()
+	if !strings.Contains(got, "OTEL_EXPORTER_OTLP_ENDPOINT: http://old -> http://new") {
+		t.Errorf("missing overwrite line:\n%s", got)
+	}
+	if strings.Contains(got, "hunter2") || strings.Contains(got, "newsecret") {
+		t.Errorf("secret value printed:\n%s", got)
+	}
+	if !strings.Contains(got, "MY_API_TOKEN: <redacted> -> <redacted>") {
+		t.Errorf("secret key not reported as redacted:\n%s", got)
+	}
+}
+
+func TestWriteClaudeSettings_UnchangedIsNotReportedUpdated(t *testing.T) {
+	dir := t.TempDir()
+	settingsVars, _ := buildTelemetryVars("http://x", "")
+	var out bytes.Buffer
+	writeClaudeSettings(&out, []string{dir}, settingsVars)
+	out.Reset()
+	updated, skipped := writeClaudeSettings(&out, []string{dir}, settingsVars)
+	if len(updated) != 0 || len(skipped) != 0 || !strings.Contains(out.String(), "already up to date") {
+		t.Errorf("updated=%v skipped=%v out=%q", updated, skipped, out.String())
 	}
 }

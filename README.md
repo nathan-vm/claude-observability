@@ -113,8 +113,9 @@ Unzip (or place both built binaries) into the same directory.
 
 It finds your Claude Code accounts, asks which ones to monitor and where
 to send telemetry, verifies the endpoint is reachable before writing
-anything, turns on telemetry for your shell/OS, and offers to install the
-collector as a background service. No runtime dependency beyond the OS
+anything, turns on telemetry for your shell/OS **and** in each monitored
+account's Claude Code `settings.json`, and offers to install the collector
+as a background service. No runtime dependency beyond the OS
 itself — Windows included.
 
 **4. Open Grafana** at http://localhost:47300. A dashboard named
@@ -149,7 +150,12 @@ a sensible default.
 | `DEDUP_DAYS`, `BATCH_SIZE`, `ORPHAN_AFTER_MS`, `EMAIL_LOOKBACK_HOURS`, `STATE_FILE` | collector | see `src/collector/cmd/collector/main.go` |
 
 The wizard writes `CLAUDE_DIR`, `CLAUDE_OBSERVABILITY_EXTRA_DIRS`, and
-`EXPORTER_STREAM` into your shell rc (or Windows environment) for you.
+`EXPORTER_STREAM` into your shell rc (or Windows environment) for you. The
+Claude Code telemetry vars (`CLAUDE_CODE_ENABLE_TELEMETRY` and the
+`OTEL_*` settings) go to both the rc file (or Windows environment) and the
+`env` block of `<claude dir>/settings.json`; the auth token
+(`OTEL_EXPORTER_OTLP_HEADERS`) is deliberately kept out of `settings.json`
+and lives in the rc file / Windows environment only.
 Everything else is a power-user knob: set it in your shell before running
 the collector by hand, or edit `docker-compose.yaml` for dash-generator's
 settings.
@@ -160,7 +166,10 @@ Common when work is split by context (`~/.claude-personal`,
 `~/.claude-work`). The wizard asks which directories to monitor and each
 gets its own dashboard. Accounts you don't pick go on the `ignore` list in
 `grafana/account-limits.json`, so they don't show up as empty dashboards
-the moment they send telemetry.
+the moment they send telemetry. `settings.json` is edited only for the
+accounts you pick (after a confirmation that lists the exact files), the
+wizard also considers `$CLAUDE_CONFIG_DIR`, and every other key in those
+files is preserved.
 
 ## Dashboards
 
@@ -197,7 +206,11 @@ wizard), not a container:
 | uninstall | stop, then remove the `.plist` | `systemctl --user disable --now claude-observability-collector` then remove the unit file | `schtasks /delete /tn ClaudeObservabilityCollector /f` |
 
 Re-run the wizard any time to reinstall the service with fresh values —
-e.g. after moving a binary or editing your shell rc.
+e.g. after moving a binary or editing your shell rc. Re-running updates
+the `env` entries in each `settings.json` (a new endpoint, say, printing
+the old and new value of every key it overwrites) but does not rewrite an
+existing rc block; the wizard warns if the rc block still has a different
+endpoint than the one you entered.
 
 Logs: `.state/claude-observability-collector.log` (collector),
 `docker compose logs -f dash-generator`.
@@ -216,6 +229,14 @@ Logs: `.state/claude-observability-collector.log` (collector),
 - **Wizard says the OTel endpoint is unreachable.** Run
   `docker compose up -d` first — the wizard never starts the stack for
   you, and it refuses to write config against an endpoint it can't reach.
+- **Sessions launched from a GUI (e.g. Maestro) send nothing.** Those
+  launchers don't source your shell rc, so telemetry comes from
+  `settings.json`: restart the launcher or session after running the
+  wizard. If the wizard reported a `settings.json` as skipped (invalid
+  JSON), fix the file and re-run. If your endpoint needs a token, note
+  that the token is not written to `settings.json`, so GUI-launched
+  sessions won't authenticate against it; set
+  `OTEL_EXPORTER_OTLP_HEADERS` in that launcher's environment.
 
 ## Adding other tools later
 

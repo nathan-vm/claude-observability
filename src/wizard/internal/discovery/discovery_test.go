@@ -89,3 +89,79 @@ func TestFind_NoAccountsReturnsEmptySlice(t *testing.T) {
 		t.Errorf("got %d accounts, want 0", len(accounts))
 	}
 }
+
+func TestWithConfigDir_AddsOutOfHomeDir(t *testing.T) {
+	home := t.TempDir()
+	mkAccountDir(t, home, ".claude", "a@example.com")
+	other := t.TempDir()
+	mkAccountDir(t, other, "cfg", "b@example.com")
+	dir := filepath.Join(other, "cfg")
+
+	accounts, _ := Find(home)
+	got := WithConfigDir(accounts, dir)
+	if len(got) != 2 || got[1].Dir != dir || got[1].Email != "b@example.com" {
+		t.Errorf("got %+v", got)
+	}
+}
+
+func TestWithConfigDir_DedupesSymlinkAndTrailingSlash(t *testing.T) {
+	home := t.TempDir()
+	mkAccountDir(t, home, ".claude", "a@example.com")
+	accounts, _ := Find(home)
+	real := filepath.Join(home, ".claude")
+
+	if got := WithConfigDir(accounts, real+string(filepath.Separator)); len(got) != 1 {
+		t.Errorf("trailing slash duplicated: %+v", got)
+	}
+
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if got := WithConfigDir(accounts, link); len(got) != 1 {
+		t.Errorf("symlink duplicated: %+v", got)
+	}
+}
+
+func TestWithConfigDir_IgnoresInvalidDirs(t *testing.T) {
+	base := []Account{{Dir: "/x"}}
+	noProjects := t.TempDir()
+	for name, dir := range map[string]string{
+		"empty":       "",
+		"nonexistent": filepath.Join(t.TempDir(), "nope"),
+		"no projects": noProjects,
+	} {
+		if got := WithConfigDir(base, dir); len(got) != 1 {
+			t.Errorf("%s: got %+v, want unchanged", name, got)
+		}
+	}
+}
+
+func TestWithConfigDir_RelativeDirMadeAbsoluteAndDeduped(t *testing.T) {
+	home := t.TempDir()
+	mkAccountDir(t, home, ".claude", "a@example.com")
+	mkAccountDir(t, home, "cfg", "b@example.com")
+	accounts, _ := Find(home)
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(home); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(wd) })
+	got := WithConfigDir(accounts, "cfg")
+	if len(got) != 2 {
+		t.Fatalf("got %+v", got)
+	}
+	if !filepath.IsAbs(got[1].Dir) {
+		t.Errorf("Dir = %q, want absolute", got[1].Dir)
+	}
+	if got[1].Email != "b@example.com" {
+		t.Errorf("Email = %q", got[1].Email)
+	}
+	if again := WithConfigDir(accounts, ".claude"); len(again) != 1 {
+		t.Errorf("relative duplicate added: %+v", again)
+	}
+}
