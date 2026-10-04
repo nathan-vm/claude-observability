@@ -506,8 +506,8 @@ func otelHeaderVars(ingestEmail, ingestToken string) []envwriter.Var {
 // credentials were entered (a purely local stack), or endpoint with
 // username:password embedded as URL userinfo otherwise. Go's net/http
 // client applies HTTP Basic Auth from a URL's userinfo automatically (see
-// docs/specs/2026-09-29-production-auth-gateway-design.md), so
-// src/collector needs no code change — only this value changes.
+// docs/specs/2026-09-29-production-auth-gateway-design.md). The collector
+// redacts the password whenever it logs or reports this URL.
 func lokiIngestURL(endpoint, username, password string) (string, error) {
 	if username == "" || password == "" {
 		return endpoint, nil

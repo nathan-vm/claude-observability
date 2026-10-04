@@ -803,3 +803,40 @@ func TestInitState_SeedsWhenSeenIsEmpty(t *testing.T) {
 		t.Error("a fresh state (empty Seen) must trigger seedSeenFromLoki")
 	}
 }
+
+func TestInitState_LogsRedactedLokiURL(t *testing.T) {
+	const pw = "s3cr3t-pw"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"status":"success","data":{"resultType":"streams","result":[]}}`))
+	}))
+	defer srv.Close()
+	lokiURL := "http://user:" + pw + "@" + strings.TrimPrefix(srv.URL, "http://")
+
+	for _, dry := range []bool{false, true} {
+		var logged []string
+		logf := func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+		_, err := InitState(Config{StatePath: filepath.Join(t.TempDir(), "state.json"), LokiURL: lokiURL, ExporterStream: "s", DedupDays: 90, DryRun: dry, Log: logf})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := strings.Join(logged, "\n")
+		if strings.Contains(out, pw) {
+			t.Errorf("dry=%v: log output leaks password:\n%s", dry, out)
+		}
+		if !strings.Contains(out, "loki: http://user:xxxxx@") {
+			t.Errorf("dry=%v: want redacted loki line, got:\n%s", dry, out)
+		}
+	}
+}
+
+func TestPushToLoki_InvalidURLErrorOmitsPassword(t *testing.T) {
+	const pw = "s3cr3t-pw"
+	records := []Record{{TimestampNs: "1700000000000000000", Line: "x", Meta: map[string]string{"tool_use_id": "a"}}}
+	_, _, err := PushToLoki("http://user:"+pw+"@ho st:3100", 100, map[string]string{"service_name": "s"}, records, t.Logf)
+	if err == nil {
+		t.Fatal("want error for invalid url")
+	}
+	if strings.Contains(err.Error(), pw) {
+		t.Errorf("error leaks password: %v", err)
+	}
+}
