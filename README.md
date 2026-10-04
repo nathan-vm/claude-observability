@@ -219,7 +219,7 @@ Logs: `.state/claude-observability-collector.log` (collector),
 
 Running the stack on a real server, reachable by more than one person's
 machine, needs the auth gateway described in
-`docs/superpowers/specs/2026-09-29-production-auth-gateway-design.md`. This
+`docs/specs/2026-09-29-production-auth-gateway-design.md`. This
 is additive — plain `docker compose up -d` (no extra flags) keeps working
 exactly as it does today, fully local and unauthenticated.
 

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.22 (wizard module `claude-observability-wizard`), Caddy 2 (≥2.8.0, for the `basic_auth` directive name), Docker Compose overlay files, bash (repo operator tooling, matching `scripts/worktree-add.sh`'s existing convention).
 
-**Spec:** `docs/superpowers/specs/2026-09-29-production-auth-gateway-design.md`
+**Spec:** `docs/specs/2026-09-29-production-auth-gateway-design.md`
 
 ## Global Constraints
 
@@ -113,7 +113,7 @@ func percentEncodeHeaderValue(s string) string {
 
 // basicAuthHeaderValue builds the OTEL_EXPORTER_OTLP_HEADERS entry for HTTP
 // Basic Auth — Caddy's basic_auth directive validates this at the gateway
-// (see docs/superpowers/specs/2026-09-29-production-auth-gateway-design.md).
+// (see docs/specs/2026-09-29-production-auth-gateway-design.md).
 // Replaces the old Bearer-token entry, which nothing ever validated.
 func basicAuthHeaderValue(username, password string) string {
 	raw := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
@@ -319,7 +319,7 @@ Add `"net/url"` to `main.go`'s import block (not yet imported there). Add this f
 // credentials were entered (a purely local stack), or endpoint with
 // username:password embedded as URL userinfo otherwise. Go's net/http
 // client applies HTTP Basic Auth from a URL's userinfo automatically (see
-// docs/superpowers/specs/2026-09-29-production-auth-gateway-design.md), so
+// docs/specs/2026-09-29-production-auth-gateway-design.md), so
 // src/collector needs no code change — only this value changes.
 func lokiIngestURL(endpoint, username, password string) (string, error) {
 	if username == "" || password == "" {
@@ -403,7 +403,7 @@ git commit -m "feat(wizard): prompt for Loki ingest credentials, embed in LOKI_U
 
 ```caddyfile
 # Production auth gateway — the only service a real-server deployment
-# exposes publicly. See docs/superpowers/specs/2026-09-29-production-auth-gateway-design.md.
+# exposes publicly. See docs/specs/2026-09-29-production-auth-gateway-design.md.
 #
 # Requires Caddy >= 2.8.0 (the "basic_auth" directive; older Caddy names it
 # "basicauth"). config/caddy-ingest-users.txt (git-ignored — see
@@ -527,7 +527,7 @@ git commit -m "feat: add Caddy gateway config for production auth"
 #
 # Plain `docker compose up -d` (no this file) is completely unaffected —
 # today's local, unauthenticated single-machine setup doesn't change.
-# See docs/superpowers/specs/2026-09-29-production-auth-gateway-design.md.
+# See docs/specs/2026-09-29-production-auth-gateway-design.md.
 
 services:
   caddy:
@@ -570,7 +570,7 @@ volumes:
 
 ```
 # Copy to .env and fill in before `docker compose -f docker-compose.yaml -f docker-compose.server.yaml up -d`.
-# See docs/superpowers/specs/2026-09-29-production-auth-gateway-design.md.
+# See docs/specs/2026-09-29-production-auth-gateway-design.md.
 
 # DNS: each must resolve to this server's public IP, and ports 80/443 must
 # be reachable from the internet (Caddy's automatic HTTPS uses Let's
@@ -635,7 +635,7 @@ git commit -m "feat: add docker-compose.server.yaml overlay for the auth gateway
 #!/usr/bin/env bash
 # Adds, rotates, or removes one person's Caddy ingest credential in
 # config/caddy-ingest-users.txt (see config/Caddyfile and
-# docs/superpowers/specs/2026-09-29-production-auth-gateway-design.md).
+# docs/specs/2026-09-29-production-auth-gateway-design.md).
 # One credential is valid on BOTH ingest routes (OTel Collector, collector
 # -> Loki) — there is only ever one line per email.
 #
@@ -846,7 +846,7 @@ Insert a new `## Production deployment` section immediately after the existing `
 
 Running the stack on a real server, reachable by more than one person's
 machine, needs the auth gateway described in
-`docs/superpowers/specs/2026-09-29-production-auth-gateway-design.md`. This
+`docs/specs/2026-09-29-production-auth-gateway-design.md`. This
 is additive — plain `docker compose up -d` (no extra flags) keeps working
 exactly as it does today, fully local and unauthenticated.
 

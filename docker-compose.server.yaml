@@ -7,7 +7,7 @@
 #
 # Plain `docker compose up -d` (no this file) is completely unaffected —
 # today's local, unauthenticated single-machine setup doesn't change.
-# See docs/superpowers/specs/2026-09-29-production-auth-gateway-design.md.
+# See docs/specs/2026-09-29-production-auth-gateway-design.md.
 
 services:
   caddy:

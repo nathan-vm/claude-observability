@@ -1,5 +1,5 @@
 # Production auth gateway — the only service a real-server deployment
-# exposes publicly. See docs/superpowers/specs/2026-09-29-production-auth-gateway-design.md.
+# exposes publicly. See docs/specs/2026-09-29-production-auth-gateway-design.md.
 #
 # Requires Caddy >= 2.8.0 (the "basic_auth" directive; older Caddy names it
 # "basicauth"). config/caddy-ingest-users.txt (git-ignored — see
