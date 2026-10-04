@@ -9,8 +9,25 @@ import (
 	"time"
 )
 
+var defaultPorts = map[string]string{"https": "443", "http": "80"}
+
+func hostPort(u *url.URL) (string, error) {
+	if u.Hostname() == "" {
+		return "", fmt.Errorf("no host")
+	}
+	if u.Port() != "" {
+		return u.Host, nil
+	}
+	port, ok := defaultPorts[u.Scheme]
+	if !ok {
+		return "", fmt.Errorf("no port")
+	}
+	return net.JoinHostPort(u.Hostname(), port), nil
+}
+
 // Dial reports whether a TCP connection can be opened to the host:port
-// encoded in rawURL, within timeout. It knows nothing about what's on the
+// encoded in rawURL, within timeout. A missing port defaults from the scheme
+// (https 443, http 80). It knows nothing about what's on the
 // other end — this is the same check whether rawURL points at a local
 // docker stack or a remote collector.
 func Dial(rawURL string, timeout time.Duration) error {
@@ -18,10 +35,11 @@ func Dial(rawURL string, timeout time.Duration) error {
 	if err != nil {
 		return fmt.Errorf("invalid endpoint %q: %w", rawURL, err)
 	}
-	if u.Port() == "" {
+	addr, err := hostPort(u)
+	if err != nil {
 		return fmt.Errorf("endpoint %q has no port", rawURL)
 	}
-	conn, err := net.DialTimeout("tcp", u.Host, timeout)
+	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
 		return fmt.Errorf("cannot reach %s: %w", rawURL, err)
 	}

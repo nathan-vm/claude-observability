@@ -353,9 +353,9 @@ func TestWriteClaudeSettings_UnchangedIsNotReportedUpdated(t *testing.T) {
 func TestPercentEncodeHeaderValue(t *testing.T) {
 	cases := map[string]string{
 		"Basic dGVzdA==": "Basic%20dGVzdA%3D%3D",
-		"a,b":             "a%2Cb",
-		"a=b":             "a%3Db",
-		"simple":          "simple",
+		"a,b":            "a%2Cb",
+		"a=b":            "a%3Db",
+		"simple":         "simple",
 	}
 	for in, want := range cases {
 		if got := percentEncodeHeaderValue(in); got != want {
