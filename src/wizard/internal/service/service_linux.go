@@ -82,3 +82,14 @@ func Install(cfg Config) error {
 	}
 	return nil
 }
+
+// MigrateLegacy disables and removes the systemd --user unit registered under
+// opts.LegacyLabel when its executable is one of opts.OwnedCommands. It
+// returns ErrNotOwned, leaving the unit alone, when it runs anything else.
+func MigrateLegacy(opts MigrateOptions) (bool, error) {
+	path, err := unitPath(opts.LegacyLabel)
+	if err != nil {
+		return false, err
+	}
+	return migrateSystemdUnit(path, opts, execRunner)
+}

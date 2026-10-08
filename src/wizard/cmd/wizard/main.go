@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -129,10 +130,11 @@ func run() error {
 	}
 
 	allVars := append(append([]envwriter.Var{}, telemetryVars...), collectorVars...)
+	allVars = carryForwardCollectorVars(home, allVars)
 
 	fmt.Fprintln(out, "\n── Enabling telemetry in your shell ───────────────────────")
-	if warning := staleEndpointWarning(home, endpoint); warning != "" {
-		fmt.Fprintln(out, warning)
+	for _, line := range rcRewriteWarnings(home, allVars) {
+		fmt.Fprintln(out, line)
 	}
 	if err := writeShellConfig(out, home, allVars); err != nil {
 		return err
@@ -172,7 +174,7 @@ func run() error {
 
 	fmt.Fprintln(out, "\n── Collector ─────────────────────────────────────────────────")
 	if wizard.AskYesNo(out, stdin, "  Install the collector as a background service now?", true) {
-		if err := installCollectorService(repoRoot, collectorVars); err != nil {
+		if err := installCollectorService(out, repoRoot, collectorVars); err != nil {
 			return fmt.Errorf("installing collector service: %w", err)
 		}
 		fmt.Fprintln(out, "  installed and started")
@@ -298,23 +300,90 @@ func displayForLog(name, value string) string {
 	return value
 }
 
-// staleEndpointWarning returns a warning when the existing rc block already
-// pins a different OTEL_EXPORTER_OTLP_ENDPOINT than the one just chosen (the
-// rc block is write-once, so it won't be rewritten), or "" otherwise. Always
-// "" on Windows, where setx overwrites.
-func staleEndpointWarning(home, endpoint string) string {
+// rcRewriteWarnings returns the lines to show before writeShellConfig rewrites
+// the rc block, computed from what the block holds now: a migration notice
+// when the block is still under the legacy marker, an info line when the OTel
+// endpoint changes, and a warning when the auth header would be dropped
+// because no ingest credentials were entered this run. Values of secret vars
+// are never printed. Always nil on Windows, where setx overwrites.
+func rcRewriteWarnings(home string, vars []envwriter.Var) []string {
 	if runtime.GOOS == "windows" {
-		return ""
+		return nil
 	}
 	path, shell := shellRCPath(home)
-	existing, ok, err := envwriter.ExistingVar(path, shell, "OTEL_EXPORTER_OTLP_ENDPOINT")
-	if err != nil || !ok || existing == endpoint {
-		return ""
+	var notes []string
+
+	if pending, err := envwriter.PendingMigration(path); err == nil && pending {
+		note := fmt.Sprintf("  migrating legacy block from %s", path)
+		if stream, ok, err := envwriter.ExistingVar(path, shell, "EXPORTER_STREAM"); err == nil && ok {
+			note += fmt.Sprintf(" (EXPORTER_STREAM %s)", stream)
+		}
+		notes = append(notes, note)
 	}
-	return fmt.Sprintf("  warning: %s still has OTEL_EXPORTER_OTLP_ENDPOINT=%s, not the endpoint you entered (%s);\n  the rc block is not rewritten on re-run - edit it by hand.", path, existing, endpoint)
+
+	var newEndpoint string
+	hasHeaders := false
+	for _, v := range vars {
+		switch v.Name {
+		case "OTEL_EXPORTER_OTLP_ENDPOINT":
+			newEndpoint = v.Value
+		case "OTEL_EXPORTER_OTLP_HEADERS":
+			hasHeaders = true
+		}
+	}
+	if old, ok, err := envwriter.ExistingVar(path, shell, "OTEL_EXPORTER_OTLP_ENDPOINT"); err == nil && ok && old != newEndpoint {
+		notes = append(notes, fmt.Sprintf("  note: %s has OTEL_EXPORTER_OTLP_ENDPOINT=%s; it will be replaced with %s.",
+			path, displayForLog("OTEL_EXPORTER_OTLP_ENDPOINT", old), displayForLog("OTEL_EXPORTER_OTLP_ENDPOINT", newEndpoint)))
+	}
+	if _, ok, err := envwriter.ExistingVar(path, shell, "OTEL_EXPORTER_OTLP_HEADERS"); err == nil && ok && !hasHeaders {
+		notes = append(notes, fmt.Sprintf("  warning: %s has OTEL_EXPORTER_OTLP_HEADERS but no ingest token was entered;\n  the rewritten block will not include it. Re-run and enter the token to keep it.", path))
+	}
+	var newLoki string
+	for _, v := range vars {
+		if v.Name == "LOKI_URL" {
+			newLoki = v.Value
+		}
+	}
+	if old, ok, err := envwriter.ExistingVar(path, shell, "LOKI_URL"); err == nil && ok && hasURLCredentials(old) && !hasURLCredentials(newLoki) {
+		notes = append(notes, fmt.Sprintf("  warning: %s has a LOKI_URL with credentials but the new value has none;\n  the collector will push to Loki unauthenticated. Re-run and enter the Loki ingest email and token to keep them.", path))
+	}
+	return notes
 }
 
-func writeShellConfig(out *os.File, home string, vars []envwriter.Var) error {
+var collectorVarNames = []string{"CLAUDE_DIR", "CLAUDE_OBSERVABILITY_EXTRA_DIRS", "EXPORTER_STREAM", "LOKI_URL"}
+
+// carryForwardCollectorVars appends to vars every collector var the current rc
+// block (or the legacy block about to be migrated) holds and vars lacks, so a
+// run that configures no collector vars (no accounts found) doesn't drop the
+// existing EXPORTER_STREAM or Loki settings when the block is rewritten.
+// No-op on Windows, where setx keeps no block.
+func carryForwardCollectorVars(home string, vars []envwriter.Var) []envwriter.Var {
+	if runtime.GOOS == "windows" {
+		return vars
+	}
+	have := make(map[string]bool, len(vars))
+	for _, v := range vars {
+		have[v.Name] = true
+	}
+	path, shell := shellRCPath(home)
+	out := append([]envwriter.Var{}, vars...)
+	for _, name := range collectorVarNames {
+		if have[name] {
+			continue
+		}
+		if value, ok, err := envwriter.ExistingVar(path, shell, name); err == nil && ok {
+			out = append(out, envwriter.Var{Name: name, Value: value})
+		}
+	}
+	return out
+}
+
+func hasURLCredentials(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && u.User != nil
+}
+
+func writeShellConfig(out io.Writer, home string, vars []envwriter.Var) error {
 	if runtime.GOOS == "windows" {
 		return envwriter.WriteWindows(vars, func(name, value string) error {
 			return exec.Command("setx", name, value).Run()
@@ -323,14 +392,19 @@ func writeShellConfig(out *os.File, home string, vars []envwriter.Var) error {
 
 	path, shell := shellRCPath(home)
 
-	wrote, err := envwriter.WriteBlock(path, shell, vars)
+	res, err := envwriter.WriteBlock(path, shell, vars)
 	if err != nil {
 		return err
 	}
-	if wrote {
+	switch {
+	case res.MigratedLegacy:
+		fmt.Fprintf(out, "  migrated legacy block in %s (moved to end of file)\n", path)
+	case res.Replaced:
+		fmt.Fprintf(out, "  telemetry + collector env vars rewritten in %s (moved to end of file)\n", path)
+	case res.Changed:
 		fmt.Fprintf(out, "  telemetry + collector env vars added to %s\n", path)
-	} else {
-		fmt.Fprintf(out, "  already present in %s (edit the block by hand to change accounts)\n", path)
+	default:
+		fmt.Fprintf(out, "  already up to date in %s\n", path)
 	}
 	return nil
 }
@@ -351,7 +425,9 @@ func resolveExporterStreamValue(existing string) (string, error) {
 }
 
 // resolveExporterStream returns the EXPORTER_STREAM value this run should
-// use: the id already committed for this install, if one is found, so a
+// use: the id already committed for this install, if one is found (in the
+// rc file's current block, or in a legacy-marker block from a release before
+// the marker was namespaced, which envwriter.ExistingVar falls back to), so a
 // wizard re-run never orphans the collector's existing Loki stream — a
 // fresh id (see resolveExporterStreamValue) is minted only when none is
 // found, i.e. a genuinely new install.
@@ -398,11 +474,12 @@ func resolveExporterStream(home string) (string, error) {
 	return resolveExporterStreamValue(existing)
 }
 
-func installCollectorService(repoRoot string, collectorVars []envwriter.Var) error {
+func installCollectorService(out io.Writer, repoRoot string, collectorVars []envwriter.Var) error {
 	collectorBin, err := findCollectorBinary(repoRoot)
 	if err != nil {
 		return err
 	}
+	migrateLegacyCollector(out, repoRoot, collectorBin)
 	cfg := service.Config{
 		Label:      collectorLabel(),
 		Command:    collectorBin,
@@ -419,6 +496,33 @@ func installCollectorService(repoRoot string, collectorVars []envwriter.Var) err
 		ExtraPathDirs: claudeBinDir(),
 	}
 	return service.Install(cfg)
+}
+
+// migrateLegacyCollector retires a collector service registered under the
+// pre-namespacing label, but only when it runs an executable this checkout
+// owns, so a fork's service under the same legacy label is never touched.
+// It runs before the new service is installed so two collectors never share
+// .state/ at once. Failures are reported and never block the install.
+func migrateLegacyCollector(out io.Writer, repoRoot, collectorBin string) {
+	legacy := legacyCollectorLabel()
+	binName := "claude-observability-collector"
+	if runtime.GOOS == "windows" {
+		binName += ".exe"
+	}
+	migrated, err := service.MigrateLegacy(service.MigrateOptions{
+		LegacyLabel:   legacy,
+		OwnedCommands: []string{collectorBin, filepath.Join(repoRoot, ".bin", binName)},
+	})
+	switch {
+	case errors.Is(err, service.ErrNotOwned):
+		fmt.Fprintf(out, "  left legacy service %s alone (it points at a different install)\n", legacy)
+	case errors.Is(err, service.ErrUnverified):
+		fmt.Fprintf(out, "  warning: could not verify legacy service %s (%v);\n  left it alone - if it is yours and still running, remove it by hand.\n", legacy, err)
+	case err != nil:
+		fmt.Fprintf(out, "  warning: could not migrate legacy service %s: %v\n  remove it by hand if it is still running.\n", legacy, err)
+	case migrated:
+		fmt.Fprintf(out, "  migrated legacy service %s -> %s\n", legacy, collectorLabel())
+	}
 }
 
 // claudeBinDir returns the directory containing the `claude` CLI as found on
@@ -451,8 +555,23 @@ func findCollectorBinary(repoRoot string) (string, error) {
 	return "", fmt.Errorf("%s not found next to this binary or on PATH — build it from src/collector (go build -o %s ./cmd/collector) or download it alongside claude-observability-wizard", name, name)
 }
 
-func collectorLabel() string {
-	switch runtime.GOOS {
+func collectorLabel() string { return collectorLabelFor(runtime.GOOS) }
+
+func legacyCollectorLabel() string { return legacyCollectorLabelFor(runtime.GOOS) }
+
+func collectorLabelFor(goos string) string {
+	switch goos {
+	case "darwin":
+		return "com.nathan-vm.claude-observability.collector"
+	case "windows":
+		return "NathanVmClaudeObservabilityCollector"
+	default:
+		return "nathan-vm-claude-observability-collector"
+	}
+}
+
+func legacyCollectorLabelFor(goos string) string {
+	switch goos {
 	case "darwin":
 		return "com.claude-observability.collector"
 	case "windows":

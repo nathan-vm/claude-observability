@@ -41,6 +41,7 @@ docker-worktree.local
 # config/caddy-ingest-users.txt.example. See scripts/manage-tokens.sh.
 config/caddy-ingest-users.txt
 
-# Real production secrets (Google OAuth client, admin password, domains) —
-# template alongside at .env.example.
+# Real production secrets (Google OAuth client, admin password, domains) and
+# local port overrides (e.g. OTEL_HTTP_PORT) — template alongside at
+# .env.example.
 .env
