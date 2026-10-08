@@ -51,3 +51,17 @@ func TestGeneratePlist_IncludesArgs(t *testing.T) {
 		t.Errorf("plist missing arg: %s", out)
 	}
 }
+
+func TestGeneratePlist_ProgramArgumentsRoundTrip(t *testing.T) {
+	cfg := Config{
+		Label: "com.claude-observability.x", Command: "/repo/.bin/claude-observability-collector", Args: []string{"--once"},
+		WorkingDir: "/repo", LogDir: "/repo/.state",
+	}
+	args, err := plistProgramArguments([]byte(GeneratePlist(cfg)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(args) != 2 || args[0] != cfg.Command || args[1] != "--once" {
+		t.Errorf("args = %v", args)
+	}
+}

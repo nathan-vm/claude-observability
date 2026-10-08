@@ -133,12 +133,18 @@ prompt in a new terminal.
 | collector | — (host service) | Transcript scan + `/usage` polling |
 
 All ports are published on `127.0.0.1` only — see [Is my data sent
-anywhere?](#faq)
+anywhere?](#faq). The host ports are overridable (`OTEL_GRPC_PORT`,
+`OTEL_HTTP_PORT`, `LOKI_PORT`, `GRAFANA_PORT`), e.g. to run next to another
+install — see [Running alongside another
+install](#running-alongside-another-install-eg-a-fork).
 
 ## Configuration
 
-There's no `.env` file — every knob is a plain environment variable, with
-a sensible default.
+A `.env` file is optional. Every knob is a plain environment variable with a
+sensible default; `docker compose` also reads a `.env` in the repo root
+automatically (it is gitignored), which is where you put local port
+overrides. The same file holds the secrets for the [production
+overlay](#production-deployment) (template: `.env.example`).
 
 | Variable | Used by | Default |
 |---|---|---|
@@ -148,6 +154,7 @@ a sensible default.
 | `POLL_SECONDS` | collector, dash-generator | `60` |
 | `RATE_HALFLIFE`, `RATE_BACKFILL_DAYS`, `DASHBOARD_INTERVAL_SECONDS` | dash-generator | `20m`, `14`, `600` |
 | `DEDUP_DAYS`, `BATCH_SIZE`, `ORPHAN_AFTER_MS`, `EMAIL_LOOKBACK_HOURS`, `STATE_FILE` | collector | see `src/collector/cmd/collector/main.go` |
+| `OTEL_GRPC_PORT`, `OTEL_HTTP_PORT`, `LOKI_PORT`, `GRAFANA_PORT` | docker compose only | `47317`, `47318`, `47100`, `47300` |
 
 The wizard writes `CLAUDE_DIR`, `CLAUDE_OBSERVABILITY_EXTRA_DIRS`, and
 `EXPORTER_STREAM` into your shell rc (or Windows environment) for you. The
@@ -201,19 +208,68 @@ wizard), not a container:
 
 | | macOS (`launchd`) | Linux (`systemd --user`) | Windows (Task Scheduler) |
 |---|---|---|---|
-| status | `launchctl list \| grep claude-observability` | `systemctl --user status claude-observability-collector` | `schtasks /query /tn ClaudeObservabilityCollector` |
-| stop | `launchctl bootout gui/$UID <plist path>` | `systemctl --user stop claude-observability-collector` | `schtasks /end /tn ClaudeObservabilityCollector` |
-| uninstall | stop, then remove the `.plist` | `systemctl --user disable --now claude-observability-collector` then remove the unit file | `schtasks /delete /tn ClaudeObservabilityCollector /f` |
+| status | `launchctl list \| grep claude-observability` | `systemctl --user status nathan-vm-claude-observability-collector` | `schtasks /query /tn NathanVmClaudeObservabilityCollector` |
+| stop | `launchctl bootout gui/$UID <plist path>` | `systemctl --user stop nathan-vm-claude-observability-collector` | `schtasks /end /tn NathanVmClaudeObservabilityCollector` |
+| uninstall | stop, then remove the `.plist` (`com.nathan-vm.claude-observability.collector`) | `systemctl --user disable --now nathan-vm-claude-observability-collector` then remove the unit file | `schtasks /delete /tn NathanVmClaudeObservabilityCollector /f` |
+
+To uninstall the shell config, delete only the block under the
+`# nathan-vm/claude-observability: telemetry + collector config` marker in
+your rc file (the marker line plus the `export`/`set -gx` lines right after
+it). Leave any block under the older `# claude-observability: ...` marker
+alone if you run another install alongside this one.
 
 Re-run the wizard any time to reinstall the service with fresh values —
-e.g. after moving a binary or editing your shell rc. Re-running updates
-the `env` entries in each `settings.json` (a new endpoint, say, printing
-the old and new value of every key it overwrites) but does not rewrite an
-existing rc block; the wizard warns if the rc block still has a different
-endpoint than the one you entered.
+e.g. after moving a binary. Re-running updates the `env` entries in each
+`settings.json` (a new endpoint, say, printing the old and new value of
+every key it overwrites) and replaces the rc block: the block is rewritten
+and moved to the end of the file on every run, so values you hand-edited
+inside it are overwritten, and leaving the ingest token blank drops
+`OTEL_EXPORTER_OTLP_HEADERS` from it (the wizard warns first). Lines
+outside the block are left untouched, with one caveat: a line that assigns
+one of the variables the wizard manages (`OTEL_*`, `CLAUDE_CODE_ENABLE_TELEMETRY`,
+`CLAUDE_DIR`, `CLAUDE_OBSERVABILITY_EXTRA_DIRS`, `EXPORTER_STREAM`,
+`LOKI_URL`) directly under the block, with no blank line or comment between,
+is treated as part of the block. Any other line there (`export PATH=...`)
+is preserved. If a run configures no collector variables (no accounts
+found), the existing `EXPORTER_STREAM`, `CLAUDE_DIR`,
+`CLAUDE_OBSERVABILITY_EXTRA_DIRS` and `LOKI_URL` are carried over rather
+than dropped.
 
 Logs: `.state/claude-observability-collector.log` (collector),
 `docker compose logs -f dash-generator`.
+
+### Running alongside another install (e.g. a fork)
+
+Two installs on one machine each get their own pieces:
+
+- **Service name**: the collector is registered as
+  `com.nathan-vm.claude-observability.collector` (macOS),
+  `nathan-vm-claude-observability-collector` (Linux) or
+  `NathanVmClaudeObservabilityCollector` (Windows).
+- **rc marker**: the block is delimited by
+  `# nathan-vm/claude-observability: telemetry + collector config`.
+- **Ports**: set `OTEL_HTTP_PORT` (and `OTEL_GRPC_PORT` if needed) in `.env`
+  before `docker compose up -d`.
+
+On the first run after upgrading, the wizard migrates a pre-existing
+service and rc block (old label, old marker, same `EXPORTER_STREAM`)
+automatically. The service is removed only if it runs an executable this
+checkout owns, so a fork's service under the old name is left alone. The rc
+block is different: a block under the old marker is adopted (and its
+`EXPORTER_STREAM` reused) whenever no block of the new marker exists yet,
+because the marker alone can't tell whose it is. If only a fork's block
+carries the old marker, this wizard takes it over on its first run, and the
+fork's wizard re-adds its own the next time it runs.
+
+On Windows the wizard sets plain user environment variables with `setx`,
+under the same names as always, so there is nothing to namespace there: only
+the Scheduled Task name changes.
+
+The wizard puts its block at the end of the rc file, so its values win in
+new shells. If the other install's wizard runs later and re-appends its own
+block, its values win again until you re-run this wizard. Both wizards also
+write the `env` entries of `<claude dir>/settings.json`; the last one to run
+wins there.
 
 ## Production deployment
 

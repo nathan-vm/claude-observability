@@ -39,3 +39,10 @@ func Install(cfg Config) error {
 	}
 	return nil
 }
+
+// MigrateLegacy deletes the Scheduled Task named opts.LegacyLabel when it runs
+// one of opts.OwnedCommands. It returns ErrNotOwned, leaving the task alone,
+// when it runs anything else.
+func MigrateLegacy(opts MigrateOptions) (bool, error) {
+	return migrateScheduledTask(opts, execRunner)
+}

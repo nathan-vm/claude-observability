@@ -284,30 +284,183 @@ func TestBuildTelemetryVars_NoTokenNoHeaders(t *testing.T) {
 	}
 }
 
-func TestStaleEndpointWarning(t *testing.T) {
+func TestRCRewriteWarnings(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("rc files are not used on windows")
 	}
 	t.Setenv("SHELL", "/bin/zsh")
 	home := t.TempDir()
+	endpoint := func(v string) envwriter.Var { return envwriter.Var{Name: "OTEL_EXPORTER_OTLP_ENDPOINT", Value: v} }
 
-	if w := staleEndpointWarning(home, "http://new"); w != "" {
-		t.Errorf("no rc yet, got warning %q", w)
+	if w := rcRewriteWarnings(home, []envwriter.Var{endpoint("http://new")}); len(w) != 0 {
+		t.Errorf("no rc yet, got %q", w)
 	}
 
 	rc, shell := shellRCPath(home)
-	if _, err := envwriter.WriteBlock(rc, shell, []envwriter.Var{{Name: "OTEL_EXPORTER_OTLP_ENDPOINT", Value: "http://old"}}); err != nil {
+	const secret = "Authorization=Basic%20c2VjcmV0"
+	if _, err := envwriter.WriteBlock(rc, shell, []envwriter.Var{endpoint("http://old"), {Name: "OTEL_EXPORTER_OTLP_HEADERS", Value: secret}}); err != nil {
 		t.Fatal(err)
 	}
-	if w := staleEndpointWarning(home, "http://old"); w != "" {
-		t.Errorf("same endpoint, got warning %q", w)
+
+	same := []envwriter.Var{endpoint("http://old"), {Name: "OTEL_EXPORTER_OTLP_HEADERS", Value: secret}}
+	if w := rcRewriteWarnings(home, same); len(w) != 0 {
+		t.Errorf("unchanged vars, got %q", w)
 	}
-	w := staleEndpointWarning(home, "http://new")
-	if !strings.Contains(w, "http://old") || !strings.Contains(w, "http://new") {
-		t.Errorf("warning = %q", w)
+
+	joined := strings.Join(rcRewriteWarnings(home, []envwriter.Var{endpoint("http://new")}), "\n")
+	for _, want := range []string{"http://old", "http://new", "OTEL_EXPORTER_OTLP_HEADERS"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("warnings missing %q:\n%s", want, joined)
+		}
 	}
-	if strings.Contains(w, "settings.json") {
-		t.Errorf("warning must not make claims about settings.json: %q", w)
+	if strings.Contains(joined, secret) || strings.Contains(joined, "c2VjcmV0") {
+		t.Errorf("secret printed:\n%s", joined)
+	}
+	if strings.Contains(joined, "settings.json") {
+		t.Errorf("must not make claims about settings.json:\n%s", joined)
+	}
+}
+
+func TestRCRewriteWarnings_LegacyMigrationNotice(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("rc files are not used on windows")
+	}
+	t.Setenv("SHELL", "/bin/zsh")
+	home := t.TempDir()
+	rc, _ := shellRCPath(home)
+	if err := os.WriteFile(rc, []byte(legacyRC("claude-code-exporter-old")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(rcRewriteWarnings(home, nil), "\n")
+	if !strings.Contains(joined, "migrating legacy block from "+rc) || !strings.Contains(joined, "claude-code-exporter-old") {
+		t.Errorf("missing migration notice:\n%s", joined)
+	}
+}
+
+func legacyRC(stream string) string {
+	return "alias a=b\n" + envwriter.LegacyMarker + "\nexport EXPORTER_STREAM=\"" + stream + "\"\n"
+}
+
+func TestCollectorLabels(t *testing.T) {
+	cases := []struct{ goos, label, legacy string }{
+		{"darwin", "com.nathan-vm.claude-observability.collector", "com.claude-observability.collector"},
+		{"linux", "nathan-vm-claude-observability-collector", "claude-observability-collector"},
+		{"windows", "NathanVmClaudeObservabilityCollector", "ClaudeObservabilityCollector"},
+	}
+	for _, c := range cases {
+		if got := collectorLabelFor(c.goos); got != c.label {
+			t.Errorf("collectorLabelFor(%s) = %q, want %q", c.goos, got, c.label)
+		}
+		if got := legacyCollectorLabelFor(c.goos); got != c.legacy {
+			t.Errorf("legacyCollectorLabelFor(%s) = %q, want %q", c.goos, got, c.legacy)
+		}
+		if collectorLabelFor(c.goos) == legacyCollectorLabelFor(c.goos) {
+			t.Errorf("%s: new label equals legacy label", c.goos)
+		}
+	}
+}
+
+func TestResolveExporterStream_ReusesLegacyBlock(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix rc-file path only")
+	}
+	t.Setenv("SHELL", "/bin/zsh")
+	home := t.TempDir()
+	rc, _ := shellRCPath(home)
+	if err := os.WriteFile(rc, []byte(legacyRC("claude-code-exporter-legacy")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveExporterStream(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "claude-code-exporter-legacy" {
+		t.Errorf("got %q, want the legacy block's stream", got)
+	}
+}
+
+func TestResolveExporterStream_IgnoresForkLegacyBlockOnceMigrated(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix rc-file path only")
+	}
+	t.Setenv("SHELL", "/bin/zsh")
+	home := t.TempDir()
+	rc, shell := shellRCPath(home)
+	if _, err := envwriter.WriteBlock(rc, shell, []envwriter.Var{{Name: "CLAUDE_CODE_ENABLE_TELEMETRY", Value: "1"}}); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(rc)
+	fork := legacyRC("claude-code-exporter-zallpy")
+	if err := os.WriteFile(rc, append([]byte(fork+"\n"), data...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveExporterStream(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == "claude-code-exporter-zallpy" || !streamValuePattern.MatchString(got) {
+		t.Errorf("got %q, want a fresh stream, not the fork's", got)
+	}
+}
+
+func TestLegacyRCMigrationKeepsStreamAndIsIdempotent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix rc-file path only")
+	}
+	t.Setenv("SHELL", "/bin/zsh")
+	home := t.TempDir()
+	rc, shell := shellRCPath(home)
+	if err := os.WriteFile(rc, []byte(legacyRC("claude-code-exporter-legacy")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func() envwriter.WriteResult {
+		stream, err := resolveExporterStream(home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := envwriter.WriteBlock(rc, shell, []envwriter.Var{{Name: "EXPORTER_STREAM", Value: stream}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+
+	if res := run(); !res.MigratedLegacy || !res.Changed {
+		t.Errorf("first run res = %+v", res)
+	}
+	data, _ := os.ReadFile(rc)
+	want := "alias a=b\n" + envwriter.Render(shell, []envwriter.Var{{Name: "EXPORTER_STREAM", Value: "claude-code-exporter-legacy"}})
+	if string(data) != want {
+		t.Errorf("rc = %q, want %q", data, want)
+	}
+	if res := run(); res.Changed || res.MigratedLegacy {
+		t.Errorf("second run res = %+v, want no-op", res)
+	}
+}
+
+func TestWriteShellConfig_ReportsOutcome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("rc files are not used on windows")
+	}
+	t.Setenv("SHELL", "/bin/bash")
+	home := t.TempDir()
+	vars := []envwriter.Var{{Name: "CLAUDE_DIR", Value: "1"}}
+	for _, step := range []struct {
+		vars []envwriter.Var
+		want string
+	}{
+		{vars, "added to"},
+		{vars, "already up to date in"},
+		{[]envwriter.Var{{Name: "CLAUDE_DIR", Value: "2"}}, "rewritten in"},
+	} {
+		var out bytes.Buffer
+		if err := writeShellConfig(&out, home, step.vars); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), step.want) {
+			t.Errorf("output %q missing %q", out.String(), step.want)
+		}
 	}
 }
 
@@ -447,5 +600,90 @@ func TestLokiIngestURL_AcceptsHTTPAndHTTPS(t *testing.T) {
 		if _, err := lokiIngestURL(endpoint, "", ""); err != nil {
 			t.Errorf("lokiIngestURL(%q) error: %v", endpoint, err)
 		}
+	}
+}
+
+func TestWizardVarsAreAllManagedByEnvwriter(t *testing.T) {
+	_, telemetry := buildTelemetryVars("http://x", "a@b.co", "tok")
+	names := []string{"CLAUDE_DIR", "CLAUDE_OBSERVABILITY_EXTRA_DIRS", "EXPORTER_STREAM", "LOKI_URL"}
+	for _, v := range telemetry {
+		names = append(names, v.Name)
+	}
+	for _, n := range names {
+		if !envwriter.IsManagedName(n) {
+			t.Errorf("%s is written by the wizard but not recognised as part of the rc block", n)
+		}
+	}
+}
+
+func TestCarryForwardCollectorVars(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("rc files are not used on windows")
+	}
+	t.Setenv("SHELL", "/bin/zsh")
+	home := t.TempDir()
+	rc, shell := shellRCPath(home)
+	lokiURL := `http://a@b.co:p"w\d@localhost:47100`
+	existing := []envwriter.Var{
+		{Name: "CLAUDE_DIR", Value: "/home/.claude"},
+		{Name: "EXPORTER_STREAM", Value: "claude-code-exporter-keep"},
+		{Name: "LOKI_URL", Value: lokiURL},
+	}
+	legacy := strings.Replace(envwriter.Render(shell, existing), envwriter.Marker, envwriter.LegacyMarker, 1)
+	if err := os.WriteFile(rc, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	telemetry := []envwriter.Var{{Name: "CLAUDE_CODE_ENABLE_TELEMETRY", Value: "1"}}
+	got := carryForwardCollectorVars(home, telemetry)
+	want := append(append([]envwriter.Var{}, telemetry...), existing...)
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %v, want %v", i, got[i], want[i])
+		}
+	}
+
+	if _, err := envwriter.WriteBlock(rc, shell, got); err != nil {
+		t.Fatal(err)
+	}
+	if stream, ok, _ := envwriter.ExistingVar(rc, shell, "EXPORTER_STREAM"); !ok || stream != "claude-code-exporter-keep" {
+		t.Errorf("stream after rewrite = %q, %v", stream, ok)
+	}
+	if loki, _, _ := envwriter.ExistingVar(rc, shell, "LOKI_URL"); loki != lokiURL {
+		t.Errorf("LOKI_URL after rewrite = %q, want %q", loki, lokiURL)
+	}
+
+	supplied := []envwriter.Var{{Name: "EXPORTER_STREAM", Value: "claude-code-exporter-new"}}
+	for _, v := range carryForwardCollectorVars(home, supplied) {
+		if v.Name == "EXPORTER_STREAM" && v.Value != "claude-code-exporter-new" {
+			t.Errorf("carried value overrode the supplied one: %v", v)
+		}
+	}
+}
+
+func TestRCRewriteWarnings_LokiCredentialsDropped(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("rc files are not used on windows")
+	}
+	t.Setenv("SHELL", "/bin/zsh")
+	home := t.TempDir()
+	rc, shell := shellRCPath(home)
+	if _, err := envwriter.WriteBlock(rc, shell, []envwriter.Var{{Name: "LOKI_URL", Value: "http://alice:hunter2@localhost:47100"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	joined := strings.Join(rcRewriteWarnings(home, []envwriter.Var{{Name: "LOKI_URL", Value: "http://localhost:47100"}}), "\n")
+	if !strings.Contains(joined, "LOKI_URL") {
+		t.Errorf("missing LOKI_URL warning:\n%s", joined)
+	}
+	if strings.Contains(joined, "hunter2") || strings.Contains(joined, "alice") {
+		t.Errorf("credentials printed:\n%s", joined)
+	}
+	kept := []envwriter.Var{{Name: "LOKI_URL", Value: "http://bob:pw@localhost:47100"}}
+	if w := rcRewriteWarnings(home, kept); len(w) != 0 {
+		t.Errorf("credentials kept, got %q", w)
 	}
 }

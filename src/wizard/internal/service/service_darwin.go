@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -93,4 +94,15 @@ func Install(cfg Config) error {
 		return fmt.Errorf("launchctl enable: %w: %s", err, out)
 	}
 	return nil
+}
+
+// MigrateLegacy removes the LaunchAgent registered under opts.LegacyLabel when
+// its executable is one of opts.OwnedCommands. It returns ErrNotOwned, leaving
+// the agent alone, when it runs anything else.
+func MigrateLegacy(opts MigrateOptions) (bool, error) {
+	path, err := plistPath(opts.LegacyLabel)
+	if err != nil {
+		return false, err
+	}
+	return migrateLaunchAgent(path, strconv.Itoa(os.Getuid()), opts, execRunner)
 }

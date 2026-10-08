@@ -13,6 +13,9 @@ services:
     command: ["--config=/etc/otel-collector-config.yaml"]
     volumes:
       - ./config/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    # Both host ports can be moved with OTEL_GRPC_PORT / OTEL_HTTP_PORT (shell,
+    # a .env file, or --env-file) when another install on the machine, e.g. a
+    # fork, already holds 47317/47318. The container-side ports never change.
     ports:
       - "127.0.0.1:${OTEL_GRPC_PORT:-47317}:4317"   # OTLP gRPC  (uncommon host port)
       - "127.0.0.1:${OTEL_HTTP_PORT:-47318}:4318"   # OTLP HTTP  (uncommon host port)
