@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -212,7 +214,7 @@ func TestWriteClaudeSettings_SkipsBadFileAndContinues(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	settingsVars, _ := buildTelemetryVars("http://localhost:47317", "")
+	settingsVars, _ := buildTelemetryVars("http://localhost:47317", "", "")
 	var out bytes.Buffer
 	updated, skipped := writeClaudeSettings(&out, []string{bad, good}, settingsVars)
 
@@ -235,7 +237,7 @@ func TestWriteClaudeSettings_SkipsBadFileAndContinues(t *testing.T) {
 }
 
 func TestBuildTelemetryVars_SettingsMatchesEnvAndExcludesSecretsAndCollectorVars(t *testing.T) {
-	settingsVars, telemetryVars := buildTelemetryVars("http://example:4317", "s3cret")
+	settingsVars, telemetryVars := buildTelemetryVars("http://example:4317", "a@b.co", "s3cret")
 
 	dir := t.TempDir()
 	var out bytes.Buffer
@@ -270,13 +272,13 @@ func TestBuildTelemetryVars_SettingsMatchesEnvAndExcludesSecretsAndCollectorVars
 	}
 
 	last := telemetryVars[len(telemetryVars)-1]
-	if len(telemetryVars) != 8 || last.Name != "OTEL_EXPORTER_OTLP_HEADERS" || last.Value != "Authorization=Bearer%20s3cret" {
+	if len(telemetryVars) != 8 || last.Name != "OTEL_EXPORTER_OTLP_HEADERS" || last.Value != basicAuthHeaderValue("a@b.co", "s3cret") {
 		t.Errorf("rc vars lost the headers entry: %v", telemetryVars)
 	}
 }
 
 func TestBuildTelemetryVars_NoTokenNoHeaders(t *testing.T) {
-	_, telemetryVars := buildTelemetryVars("http://x", "")
+	_, telemetryVars := buildTelemetryVars("http://x", "", "")
 	if len(telemetryVars) != 7 {
 		t.Errorf("got %d vars, want 7", len(telemetryVars))
 	}
@@ -338,12 +340,112 @@ func TestWriteClaudeSettings_ReportsOverwrittenValuesAndRedactsSecrets(t *testin
 
 func TestWriteClaudeSettings_UnchangedIsNotReportedUpdated(t *testing.T) {
 	dir := t.TempDir()
-	settingsVars, _ := buildTelemetryVars("http://x", "")
+	settingsVars, _ := buildTelemetryVars("http://x", "", "")
 	var out bytes.Buffer
 	writeClaudeSettings(&out, []string{dir}, settingsVars)
 	out.Reset()
 	updated, skipped := writeClaudeSettings(&out, []string{dir}, settingsVars)
 	if len(updated) != 0 || len(skipped) != 0 || !strings.Contains(out.String(), "already up to date") {
 		t.Errorf("updated=%v skipped=%v out=%q", updated, skipped, out.String())
+	}
+}
+
+func TestPercentEncodeHeaderValue(t *testing.T) {
+	cases := map[string]string{
+		"Basic dGVzdA==": "Basic%20dGVzdA%3D%3D",
+		"a,b":            "a%2Cb",
+		"a=b":            "a%3Db",
+		"simple":         "simple",
+	}
+	for in, want := range cases {
+		if got := percentEncodeHeaderValue(in); got != want {
+			t.Errorf("percentEncodeHeaderValue(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestBasicAuthHeaderValue_RoundTrips(t *testing.T) {
+	got := basicAuthHeaderValue("alice@example.com", "tok 123,=")
+	const prefix = "Authorization="
+	if !strings.HasPrefix(got, prefix) {
+		t.Fatalf("got %q, want prefix %q", got, prefix)
+	}
+	decoded, err := url.QueryUnescape(strings.TrimPrefix(got, prefix))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("alice@example.com:tok 123,="))
+	if decoded != want {
+		t.Errorf("decoded = %q, want %q", decoded, want)
+	}
+}
+
+func TestOtelHeaderVars_EmptyWhenEitherMissing(t *testing.T) {
+	if got := otelHeaderVars("", "tok"); got != nil {
+		t.Errorf("got %v, want nil", got)
+	}
+	if got := otelHeaderVars("alice@example.com", ""); got != nil {
+		t.Errorf("got %v, want nil", got)
+	}
+}
+
+func TestOtelHeaderVars_BuildsBasicAuthWhenBothSet(t *testing.T) {
+	got := otelHeaderVars("alice@example.com", "tok123")
+	if len(got) != 1 || got[0].Name != "OTEL_EXPORTER_OTLP_HEADERS" {
+		t.Fatalf("got %v, want one OTEL_EXPORTER_OTLP_HEADERS var", got)
+	}
+	want := basicAuthHeaderValue("alice@example.com", "tok123")
+	if got[0].Value != want {
+		t.Errorf("Value = %q, want %q", got[0].Value, want)
+	}
+}
+
+func TestLokiIngestURL_UnchangedWhenNoCredentials(t *testing.T) {
+	got, err := lokiIngestURL("http://localhost:47100", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "http://localhost:47100" {
+		t.Errorf("got %q, want endpoint unchanged", got)
+	}
+}
+
+func TestLokiIngestURL_EmbedsCredentials(t *testing.T) {
+	got, err := lokiIngestURL("https://loki-ingest.example.com", "alice@example.com", "tok:123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.User.Username() != "alice@example.com" {
+		t.Errorf("username = %q, want %q", parsed.User.Username(), "alice@example.com")
+	}
+	password, ok := parsed.User.Password()
+	if !ok || password != "tok:123" {
+		t.Errorf("password = %q (set=%v), want %q", password, ok, "tok:123")
+	}
+	if parsed.Scheme != "https" || parsed.Host != "loki-ingest.example.com" {
+		t.Errorf("got %q, want scheme/host preserved", got)
+	}
+}
+
+func TestLokiIngestURL_RejectsBadEndpoints(t *testing.T) {
+	for _, endpoint := range []string{"localhost:47100", "host", "loki.example.com", "ftp://loki.example.com", "http://", "https:///path", ""} {
+		for _, creds := range [][2]string{{"", ""}, {"alice@example.com", "tok"}} {
+			got, err := lokiIngestURL(endpoint, creds[0], creds[1])
+			if err == nil {
+				t.Errorf("lokiIngestURL(%q, %q, %q) = %q, want error", endpoint, creds[0], creds[1], got)
+			}
+		}
+	}
+}
+
+func TestLokiIngestURL_AcceptsHTTPAndHTTPS(t *testing.T) {
+	for _, endpoint := range []string{"http://localhost:47100", "https://loki-ingest.example.com", "https://loki-ingest.example.com:8443/"} {
+		if _, err := lokiIngestURL(endpoint, "", ""); err != nil {
+			t.Errorf("lokiIngestURL(%q) error: %v", endpoint, err)
+		}
 	}
 }

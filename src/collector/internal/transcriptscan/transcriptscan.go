@@ -11,7 +11,6 @@ import (
 	"io"
 	"math"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -676,9 +675,9 @@ func PushToLoki(lokiURL string, batchSize int, defaultLabels map[string]string, 
 		return a < b
 	})
 
-	pushURL, urlErr := url.Parse(lokiURL)
+	pushURL, urlErr := lokiclient.ParseURL(lokiURL)
 	if urlErr != nil {
-		return nil, nil, fmt.Errorf("invalid loki url %q: %w", lokiURL, urlErr)
+		return nil, nil, urlErr
 	}
 	pushURL.Path = "/loki/api/v1/push"
 
@@ -841,9 +840,9 @@ func SeedSeenFromLoki(lokiURL, exporterStream string, dedupDays int, seen map[st
 func InitState(cfg Config) (*state.State, error) {
 	cfg.Log("transcripts: %s", strings.Join(cfg.ConfigDirs, ", "))
 	if cfg.DryRun {
-		cfg.Log("loki: %s  (dry-run)", cfg.LokiURL)
+		cfg.Log("loki: %s  (dry-run)", lokiclient.RedactURL(cfg.LokiURL))
 	} else {
-		cfg.Log("loki: %s", cfg.LokiURL)
+		cfg.Log("loki: %s", lokiclient.RedactURL(cfg.LokiURL))
 	}
 	st, err := state.Load(cfg.StatePath)
 	if err != nil {

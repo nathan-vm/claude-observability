@@ -1,0 +1,49 @@
+# Production auth gateway — the only service a real-server deployment
+# exposes publicly. See docs/specs/2026-09-29-production-auth-gateway-design.md.
+#
+# Requires Caddy >= 2.8.0 (the "basic_auth" directive; older Caddy names it
+# "basicauth"). config/caddy-ingest-users.txt (git-ignored — see
+# config/caddy-ingest-users.txt.example) holds one "<email> <bcrypt-hash>"
+# line per person, managed by scripts/manage-tokens.sh.
+#
+# All credential checking happens here — otel-collector and Loki are never
+# given their own auth config, and the internal otel-collector -> loki
+# write stays exactly as unauthenticated as it is today.
+
+{$OTEL_DOMAIN} {
+	basic_auth * {
+		import /etc/caddy/caddy-ingest-users.txt
+	}
+	# otel-collector's OTLP gRPC receiver speaks cleartext HTTP/2
+	# internally (TLS is Caddy's job, at the public edge) — without this,
+	# Caddy defaults to HTTP/1.1 to the backend, which gRPC cannot use.
+	reverse_proxy otel-collector:4317 {
+		transport http {
+			versions h2c
+		}
+	}
+}
+
+{$LOKI_INGEST_DOMAIN} {
+	basic_auth * {
+		import /etc/caddy/caddy-ingest-users.txt
+	}
+	# An ingest token is valid for push and read, never for Loki's
+	# delete/flush/admin endpoints — everything off this list is a 403
+	# (after auth). The collector only needs push and query_range; the rest
+	# is the read API Grafana-style tooling uses. Caddy matches the cleaned
+	# path, so "push/../delete" does not slip through.
+	@allowed path /loki/api/v1/push /loki/api/v1/query /loki/api/v1/query_range /loki/api/v1/labels /loki/api/v1/label/* /loki/api/v1/series /loki/api/v1/index/*
+	handle @allowed {
+		reverse_proxy loki:3100
+	}
+	handle {
+		respond "forbidden" 403
+	}
+}
+
+{$GRAFANA_DOMAIN} {
+	# Grafana authenticates itself (Google OAuth — see
+	# docker-compose.server.yaml); Caddy just proxies.
+	reverse_proxy grafana:3000
+}

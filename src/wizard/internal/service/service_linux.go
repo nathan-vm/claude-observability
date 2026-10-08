@@ -70,7 +70,7 @@ func Install(cfg Config) error {
 	if err := os.MkdirAll(cfg.LogDir, 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, []byte(GenerateUnit(cfg)), 0o644); err != nil {
+	if err := writePrivateFile(path, []byte(GenerateUnit(cfg))); err != nil {
 		return err
 	}
 

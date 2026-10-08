@@ -7,12 +7,39 @@ package lokiclient
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 )
+
+// ParseURL parses a Loki base URL. The returned error never contains the raw
+// string: url.Parse errors embed it verbatim, and it may carry basic-auth
+// credentials in its userinfo.
+func ParseURL(raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		var uerr *url.Error
+		if errors.As(err, &uerr) {
+			err = uerr.Err
+		}
+		return nil, fmt.Errorf("invalid loki url: %w", err)
+	}
+	return u, nil
+}
+
+// RedactURL renders a Loki base URL for logs with any password in its
+// userinfo replaced by "xxxxx". Unparseable input yields a placeholder, never
+// the raw string.
+func RedactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "<unparseable url>"
+	}
+	return u.Redacted()
+}
 
 // StreamResult is one Loki log-query result group: its labels (including
 // any structured-metadata fields Loki surfaces here) plus its
@@ -53,9 +80,9 @@ func QueryRange(lokiURL, query string, startNs, endNs int64, limit int, directio
 	if direction != "" {
 		params.Set("direction", direction)
 	}
-	u, err := url.Parse(lokiURL)
+	u, err := ParseURL(lokiURL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid loki url %q: %w", lokiURL, err)
+		return nil, err
 	}
 	u.Path = "/loki/api/v1/query_range"
 	u.RawQuery = params.Encode()
@@ -122,9 +149,9 @@ func Push(lokiURL string, streams []Stream) error {
 	if err != nil {
 		return err
 	}
-	u, err := url.Parse(lokiURL)
+	u, err := ParseURL(lokiURL)
 	if err != nil {
-		return fmt.Errorf("invalid loki url %q: %w", lokiURL, err)
+		return err
 	}
 	u.Path = "/loki/api/v1/push"
 

@@ -3,7 +3,23 @@
 // logon-triggered Scheduled Task on Windows.
 package service
 
-import "claude-observability-wizard/internal/envwriter"
+import (
+	"os"
+
+	"claude-observability-wizard/internal/envwriter"
+)
+
+// writePrivateFile writes a service definition owner-only (0600). The
+// definition embeds Env, which can carry credentials (LOKI_URL with
+// user:token@), so it must not be world-readable. WriteFile only applies the
+// mode when it creates the file, so the explicit Chmod also tightens a file
+// left at 0644 by an earlier install.
+func writePrivateFile(path string, data []byte) error {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
+}
 
 // Config holds everything an OS-specific installer needs to register a
 // program as a background service. Generic over what it runs — the same

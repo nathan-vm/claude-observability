@@ -1,0 +1,10 @@
+# One line per person: <email> <bcrypt-hash>, generated and managed by
+# scripts/manage-tokens.sh — never hand-edit a hash in here, only let the
+# script add/replace/remove whole lines.
+#
+# Copy this file to config/caddy-ingest-users.txt (git-ignored — it holds
+# real credential hashes) before bringing up docker-compose.server.yaml:
+#   cp config/caddy-ingest-users.txt.example config/caddy-ingest-users.txt
+#
+# Apply changes to a running gateway without downtime:
+#   docker compose -f docker-compose.yaml -f docker-compose.server.yaml exec caddy caddy reload --config /etc/caddy/Caddyfile

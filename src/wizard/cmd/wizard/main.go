@@ -2,8 +2,10 @@ package main
 
 import (
 	"bufio"
+	"encoding/base64"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -63,10 +65,15 @@ func run() error {
 		accounts = []discovery.Account{{Dir: filepath.Join(home, ".claude")}}
 	}
 	chosen, rejected := wizard.ChooseAccounts(out, stdin, accounts)
+	defaultEmail := ""
+	if len(chosen) > 0 {
+		defaultEmail = chosen[0].Email
+	}
 
 	fmt.Fprintln(out, "\n── OTel endpoint ───────────────────────────────────────────")
 	endpoint := wizard.AskLine(out, stdin, "OTel endpoint", "http://localhost:47317")
-	token := wizard.AskLine(out, stdin, "OTel token", "")
+	ingestEmail := wizard.AskLine(out, stdin, "OTel ingest email (blank for a purely local stack)", defaultEmail)
+	ingestToken := wizard.AskLine(out, stdin, "OTel ingest token", "")
 
 	fmt.Fprintf(out, "  checking %s ... ", endpoint)
 	if err := health.Dial(endpoint, 3*time.Second); err != nil {
@@ -78,7 +85,7 @@ func run() error {
 	}
 	fmt.Fprintln(out, "ok")
 
-	settingsVars, telemetryVars := buildTelemetryVars(endpoint, token)
+	settingsVars, telemetryVars := buildTelemetryVars(endpoint, ingestEmail, ingestToken)
 
 	var collectorVars []envwriter.Var
 	if len(chosen) > 0 {
@@ -99,6 +106,26 @@ func run() error {
 			return err
 		}
 		collectorVars = append(collectorVars, envwriter.Var{Name: "EXPORTER_STREAM", Value: streamValue})
+
+		fmt.Fprintln(out, "\n── Loki ingest (collector) ─────────────────────────────────")
+		lokiEndpoint := wizard.AskLine(out, stdin, "Loki endpoint", "http://localhost:47100")
+		lokiEmail := wizard.AskLine(out, stdin, "Loki ingest email (blank for a purely local stack)", defaultEmail)
+		lokiToken := wizard.AskLine(out, stdin, "Loki ingest token", "")
+		lokiURLValue, err := lokiIngestURL(lokiEndpoint, lokiEmail, lokiToken)
+		if err != nil {
+			return err
+		}
+
+		fmt.Fprintf(out, "  checking %s ... ", lokiEndpoint)
+		if err := health.Dial(lokiEndpoint, 3*time.Second); err != nil {
+			fmt.Fprintln(out, "unreachable")
+			if lokiEndpoint == "http://localhost:47100" {
+				return fmt.Errorf("can't reach %s — nothing is listening there.\n  Run `docker compose up -d` first, then re-run this wizard", lokiEndpoint)
+			}
+			return fmt.Errorf("can't reach %s — nothing is listening there.\n  Check the URL and that it's reachable from this machine", lokiEndpoint)
+		}
+		fmt.Fprintln(out, "ok")
+		collectorVars = append(collectorVars, envwriter.Var{Name: "LOKI_URL", Value: lokiURLValue})
 	}
 
 	allVars := append(append([]envwriter.Var{}, telemetryVars...), collectorVars...)
@@ -121,7 +148,7 @@ func run() error {
 		}
 		if wizard.AskYesNo(out, stdin, "  Also enable telemetry in these Claude Code settings files (existing values of these env keys are overwritten)?", true) {
 			updatedSettings, skippedSettings = writeClaudeSettings(out, targets, settingsVars)
-			if token != "" {
+			if len(telemetryVars) > len(settingsVars) {
 				fmt.Fprintln(out, "  note: the auth token (OTEL_EXPORTER_OTLP_HEADERS) is not written to settings.json;")
 				fmt.Fprintln(out, "  sessions that don't read your shell rc will not authenticate against a gateway-protected endpoint.")
 			}
@@ -201,7 +228,7 @@ func shellRCPath(home string) (path string, shell envwriter.Shell) {
 // OTEL_EXPORTER_OTLP_HEADERS (the auth token) is deliberately only in the
 // latter: settings.json is a plaintext file other tools may read or sync, so
 // the token is not copied into it.
-func buildTelemetryVars(endpoint, token string) (settingsVars, telemetryVars []envwriter.Var) {
+func buildTelemetryVars(endpoint, ingestEmail, ingestToken string) (settingsVars, telemetryVars []envwriter.Var) {
 	settingsVars = []envwriter.Var{
 		{Name: "CLAUDE_CODE_ENABLE_TELEMETRY", Value: "1"},
 		{Name: "OTEL_METRICS_EXPORTER", Value: "otlp"},
@@ -212,12 +239,7 @@ func buildTelemetryVars(endpoint, token string) (settingsVars, telemetryVars []e
 		{Name: "OTEL_LOGS_EXPORT_INTERVAL", Value: "30000"},
 	}
 	telemetryVars = append([]envwriter.Var{}, settingsVars...)
-	if token != "" {
-		telemetryVars = append(telemetryVars, envwriter.Var{
-			Name:  "OTEL_EXPORTER_OTLP_HEADERS",
-			Value: "Authorization=Bearer%20" + token,
-		})
-	}
+	telemetryVars = append(telemetryVars, otelHeaderVars(ingestEmail, ingestToken)...)
 	return settingsVars, telemetryVars
 }
 
@@ -447,4 +469,68 @@ func hasArg(name string) bool {
 		}
 	}
 	return false
+}
+
+// percentEncodeHeaderValue percent-encodes s per RFC 3986 unreserved
+// characters (A-Za-z0-9-._~) only — every other byte, including the ","
+// and "=" the OTLP header-list format (OTEL_EXPORTER_OTLP_HEADERS) uses as
+// its own delimiters, becomes %XX. This guarantees the encoded value can't
+// be misread as extra key=value pairs regardless of exactly how/when the
+// receiving SDK splits vs. percent-decodes it.
+func percentEncodeHeaderValue(s string) string {
+	const hex = "0123456789ABCDEF"
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' || c == '~' {
+			b.WriteByte(c)
+			continue
+		}
+		b.WriteByte('%')
+		b.WriteByte(hex[c>>4])
+		b.WriteByte(hex[c&0x0f])
+	}
+	return b.String()
+}
+
+// basicAuthHeaderValue builds the OTEL_EXPORTER_OTLP_HEADERS entry for HTTP
+// Basic Auth — Caddy's basic_auth directive validates this at the gateway
+// (see docs/specs/2026-09-29-production-auth-gateway-design.md).
+// Replaces the old Bearer-token entry, which nothing ever validated.
+func basicAuthHeaderValue(username, password string) string {
+	raw := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
+	return "Authorization=" + percentEncodeHeaderValue("Basic "+raw)
+}
+
+// otelHeaderVars returns the OTEL_EXPORTER_OTLP_HEADERS var to write, or
+// nil when no ingest credentials were entered (a purely local stack, where
+// nothing validates the header anyway).
+func otelHeaderVars(ingestEmail, ingestToken string) []envwriter.Var {
+	if ingestEmail == "" || ingestToken == "" {
+		return nil
+	}
+	return []envwriter.Var{{Name: "OTEL_EXPORTER_OTLP_HEADERS", Value: basicAuthHeaderValue(ingestEmail, ingestToken)}}
+}
+
+// lokiIngestURL builds the collector's LOKI_URL: endpoint unchanged when no
+// credentials were entered (a purely local stack), or endpoint with
+// username:password embedded as URL userinfo otherwise. The endpoint must be
+// an http(s) URL with a host either way — a scheme-less "localhost:47100"
+// would otherwise parse into something the credentials silently never reach. Go's net/http
+// client applies HTTP Basic Auth from a URL's userinfo automatically (see
+// docs/specs/2026-09-29-production-auth-gateway-design.md). The collector
+// redacts the password whenever it logs or reports this URL.
+func lokiIngestURL(endpoint, username, password string) (string, error) {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return "", fmt.Errorf("invalid Loki endpoint %q: %w", endpoint, err)
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		return "", fmt.Errorf("invalid Loki endpoint %q: must be an http:// or https:// URL with a host (e.g. http://localhost:47100)", endpoint)
+	}
+	if username == "" || password == "" {
+		return endpoint, nil
+	}
+	u.User = url.UserPassword(username, password)
+	return u.String(), nil
 }

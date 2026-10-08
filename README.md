@@ -215,6 +215,60 @@ endpoint than the one you entered.
 Logs: `.state/claude-observability-collector.log` (collector),
 `docker compose logs -f dash-generator`.
 
+## Production deployment
+
+Running the stack on a real server, reachable by more than one person's
+machine, needs the auth gateway described in
+`docs/specs/2026-09-29-production-auth-gateway-design.md`. This
+is additive — plain `docker compose up -d` (no extra flags) keeps working
+exactly as it does today, fully local and unauthenticated.
+
+**One-time setup:**
+
+1. Point three DNS A records at the server: one each for the OTel ingest,
+   Loki ingest, and Grafana domains (ports 80/443 must be reachable from
+   the internet — Caddy's automatic HTTPS needs this for Let's Encrypt).
+2. Register an OAuth 2.0 Client ID in Google Cloud Console (Web
+   application; authorized redirect URI `https://<your-grafana-domain>/login/google`).
+3. `cp .env.example .env` and fill in the domains, Google OAuth client
+   ID/secret, allowed email domain, and a Grafana admin password.
+4. `cp config/caddy-ingest-users.txt.example config/caddy-ingest-users.txt`
+
+**Bring the stack up:**
+
+```bash
+docker compose -f docker-compose.yaml -f docker-compose.server.yaml up -d
+```
+
+**Add a person:**
+
+```bash
+scripts/manage-tokens.sh add alice@example.com
+```
+
+This prints a token once (on a `TOKEN=` line) — hand it to them over a secure channel (it is
+never shown again). They enter it, along with their email, into the
+ingest email/token fields inside the wizard's "OTel endpoint" and "Loki
+ingest (collector)" sections when they run setup pointed at your domains
+instead of `localhost`. Their Grafana access is separate: anyone signing
+in with an `@<your-allowed-domain>` Google account can log in — no token
+needed there.
+
+The Loki ingest domain only forwards `/loki/api/v1/` push, query,
+query_range, labels, label, series and index paths; an authenticated
+request to anything else (delete, flush, admin) gets a 403.
+
+**Revoke a person:**
+
+```bash
+scripts/manage-tokens.sh remove alice@example.com
+docker compose -f docker-compose.yaml -f docker-compose.server.yaml exec caddy caddy reload --config /etc/caddy/Caddyfile
+```
+
+This only removes their ingest credential — Grafana access for a
+domain-restricted Google account is revoked by removing them from your
+Google Workspace, not from anything here.
+
 ## Troubleshooting
 
 - **A dashboard doesn't reflect edits to the template.** Don't edit
